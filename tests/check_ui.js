@@ -183,6 +183,10 @@ function reportErrors(label, errors) {
   await loginForTests();
   check('取得测试用会话', !!SID, SID ? `ars_sid=${SID.slice(0, 10)}…` : '（未取得）');
 
+  /* 站点英文标题的**期望值**写死在测试里（不从页面读回来比对，否则等于没测）。
+     源头是 common.js 的 SITE_TITLE_EN；改标题时这两处一起改。 */
+  const EXPECT_TITLE_EN = 'Beiliang After-Sales Return Registration System';
+
   // 登录页要在**没有会话**的状态下验证，所以单独用干净 fetch 加载
   console.log('\n[登录页] login.html（未登录状态）');
   try {
@@ -214,6 +218,9 @@ function reportErrors(label, errors) {
           [...docL.querySelectorAll('button')].some(b => b.textContent.includes('登'))
           && !!docL.querySelector('.login-brand__logo'),
           docL.querySelector('.card__title') ? docL.querySelector('.card__title').textContent : '');
+    check('登录页品牌区显示英文全称标题',
+          (docL.querySelector('.login-brand__sub') || {}).textContent === EXPECT_TITLE_EN,
+          (docL.querySelector('.login-brand__sub') || {}).textContent || '(未找到)');
     check('登录页显示服务连通状态',
           /服务(正常|未连接)/.test(docL.body.textContent),
           (docL.body.textContent.match(/服务(正常|未连接)[^·]*/) || [''])[0].slice(0, 40));
@@ -248,17 +255,65 @@ function reportErrors(label, errors) {
     const { doc, errors } = ctx;
     check(`${label} 脚本执行完毕`, (doc.body.textContent || '').trim().length > 30,
           `${doc.body.textContent.trim().length} 字符`);
+    check(`${label} 侧栏英文标题为全称`,
+          (doc.querySelector('.sidebar__sub') || {}).textContent === EXPECT_TITLE_EN,
+          (doc.querySelector('.sidebar__sub') || {}).textContent || '(未找到)');
     reportErrors(label, errors);
   }
 
   // ---- 退回登记：交互级验证 ----
   console.log('\n[交互] 退回登记 · 产品明细增删');
-  const { doc, errors } = await loadPage('/scan.html', 2000);
-  const dataRows = () => doc.querySelectorAll('#line-host tbody tr:not(.line-detail)').length;
-  const btnAdd = [...doc.querySelectorAll('button')]
+  // 本段自己的 window —— 别再像上一版那样引 ctxA（那是数据接口段的变量，
+// 在这里属于未定义，会让整个校验器崩掉、PASS 数骤降且看不到 FAIL）。
+const { doc, errors, window: scanWin } = await loadPage('/scan.html', 2000);
+
+/* 布局（2026-09-20）：
+   - 蓝色扫描区**整体移除**（输入框 + 三个按钮 + 状态行 + 摄像头预览）。
+     扫码没有失效 —— 走的是全局扫码枪 attachScanner()，物理枪在页面任意位置
+     输入即可触发匹配，不需要那块 UI。
+   - 「整单信息」上方的匹配提示框（#match-banner）**恢复**。
+   注意别跟 #check-banner 搞混：那是「整单信息」**下方**的查重框，一直都在。 */
+check('蓝色扫描区已移除（扫码改走全局扫码枪）',
+      !doc.querySelector('.scan-hero'),
+      doc.querySelector('.scan-hero') ? '仍存在' : '已移除');
+check('匹配提示框（#match-banner）已恢复',
+      !!doc.querySelector('#match-banner'), '存在');
+check('查重框（整单信息下方那个）保留，未被误删',
+      !!doc.querySelector('#check-banner'),
+      doc.querySelector('#check-banner') ? '存在' : '已丢失');
+
+/* 全局扫码枪端到端：页面上已经没有扫描输入框了，直接往 document 上打一串
+   快速按键（模拟扫码枪），应当触发匹配并在提示框里出结果。
+   它守的是一个**很容易被破坏**的前提：
+     ① attachScanner 还在（删掉它就彻底没入口了）；
+     ② **启动时焦点不在任何输入框里** —— attachScanner 的设计是「焦点在
+        输入框内就避让，交给输入框自己处理」，所以 scan.html 启动时做了
+        blur；谁要是又给某个字段加了自动聚焦，这条断言会立刻变红。
+        2026-09-20 正是踩了这个坑：删掉扫描区后焦点留在「退回单号」里，
+        第一个扫码会被吞掉，而页面看起来一切正常。 */
+const _gunCode = 'SMOKE-GUN-NOT-EXIST';
+for (const _ch of _gunCode) {
+  doc.dispatchEvent(new scanWin.KeyboardEvent('keydown',
+    { key: _ch, bubbles: true }));
+  await sleep(12);
+}
+await sleep(1400);
+const _banner = doc.querySelector('#match-banner');
+check('扫码枪（页面无输入框）仍能触发匹配并在提示框出结果',
+      !!_banner && _banner.children.length > 0,
+      _banner ? `${_banner.children.length} 个子节点` : '(提示框不存在)');
+
+const dataRows = () => doc.querySelectorAll('#line-host tbody tr:not(.line-detail)').length;
+  /* 选择器必须限定在明细工具条里 —— 页面上别处也可能有「新增一行」类按钮
+     （如历史里查不到的条码会在提示框里给出「当产品」选择），
+     按文案全局找会抓错元素。2026-09-20 就因此踩过：抓到提示框的按钮，
+     点击后元素已被移除，却还在点那个游离节点，每点一次都往明细里加一行。 */
+  const btnAdd = [...doc.querySelectorAll('.line-toolbar button')]
     .find(b => b.textContent.includes('新增一行'));
 
-  check('找到「＋ 新增一行」按钮', !!btnAdd);
+  check('找到「＋ 新增一行」按钮（且来自明细工具条，不是别处的同名按钮）',
+        !!btnAdd && !!btnAdd.closest('.line-toolbar'),
+        btnAdd ? (btnAdd.closest('.line-toolbar') ? '来自工具条' : '🔴 抓到别处的按钮') : '(未找到)');
   if (btnAdd) {
     const n0 = dataRows();
     btnAdd.click();
@@ -276,7 +331,7 @@ function reportErrors(label, errors) {
       + '#line-host tbody tr:not(.line-detail) td input');
     check('明细行控件已渲染', ctrls.length > 0, `${ctrls.length} 个控件`);
 
-    const btnClear = [...doc.querySelectorAll('button')]
+    const btnClear = [...doc.querySelectorAll('.line-toolbar button')]
       .find(b => b.textContent.includes('清空明细'));
     if (btnClear) {
       btnClear.click();
@@ -373,8 +428,12 @@ function reportErrors(label, errors) {
     };
     check('料号格已渲染为可搜索下拉', !!cbOf('material_no'),
           cbOf('material_no') ? '有候选面板' : '未渲染');
-    check('产品编号格已渲染为可搜索下拉', !!cbOf('product_code'),
-          cbOf('product_code') ? '有候选面板' : '未渲染');
+    // 2026-09-20：产品编号是铭牌序列号（一次性），改成纯输入框，不做候选
+    check('产品编号格是纯输入框（序列号不做候选下拉）',
+          !!cellOf('product_code') && !cbOf('product_code'),
+          cellOf('product_code')
+            ? (cbOf('product_code') ? '🔴 仍是可搜索下拉' : '纯输入，无候选面板')
+            : '(未找到该格)');
     check('生产年份格已渲染为可搜索下拉', !!cbOf('production_year'),
           cbOf('production_year') ? '有候选面板' : '未渲染');
 
@@ -433,6 +492,264 @@ function reportErrors(label, errors) {
     await sleep(200);
     check('暂停后重新输入可恢复弹出候选',
           !panel2.classList.contains('hidden'), '面板恢复可见');
+
+    // ---- 回车 = 换行（2026-09-20 新增）----
+    // 规则：最后一行的任意格回车 → 新增一行、焦点停在新行同一格；
+    //       中间行回车 → 焦点下移一行、不新增行。
+    //       料号/产品编号格的回车仍先完成回填/解析，再执行上述动作。
+    console.log('\n[交互] 退回登记 · 回车换行');
+    btnClear.click();               // 先归零，避免前面测试的行数干扰判断
+    await sleep(400);
+    btnAdd.click();
+    await sleep(500);
+
+    const kTrs = () => [...doc.querySelectorAll('#line-host tbody tr:not(.line-detail)')];
+    const kCellAt = (i, f) => {
+      const tr = kTrs()[i];
+      return tr ? tr.querySelector(`[data-field="${f}"]`) : null;
+    };
+    const kValAt = (i, f) => (kCellAt(i, f) ? kCellAt(i, f).value : '(无)');
+    const kFieldOf = el => (el && el.dataset
+      ? (el.dataset.field || el.tagName) : '(无)');
+    const kEnterOn = el => el.dispatchEvent(
+      new W.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+
+    // ① 最后一行的普通格回车 → 新增一行，焦点落在新行同一格
+    const kN0 = dataRows();
+    const kC1 = kCellAt(kN0 - 1, 'return_qty');
+    check('找到最后一行的普通格（退回数量）', !!kC1, kC1 ? '存在' : '(未找到)');
+    if (kC1) {
+      kC1.focus();
+      kC1.value = '3';
+      kC1.dispatchEvent(new W.Event('input', { bubbles: true }));
+      kEnterOn(kC1);
+      await sleep(500);
+      check('最后一行的普通格回车 → 新增一行',
+            dataRows() === kN0 + 1, `${kN0} → ${dataRows()}`);
+      check('回车后焦点落在新行的同一格',
+            doc.activeElement === kCellAt(dataRows() - 1, 'return_qty'),
+            `焦点=${kFieldOf(doc.activeElement)}`);
+      check('新增后原来那行的值没丢',
+            kValAt(kN0 - 1, 'return_qty') === '3', `原行退回数量=${kValAt(kN0 - 1, 'return_qty')}`);
+
+      // ② 中间行回车 → 不新增，焦点下移一行
+      const kM0 = dataRows();
+      const kCm = kCellAt(0, 'return_qty');
+      kCm.focus();
+      kEnterOn(kCm);
+      await sleep(500);
+      check('中间行回车不新增行', dataRows() === kM0, `仍为 ${kM0} 行`);
+      check('中间行回车 → 焦点下移到下一行同一格',
+            doc.activeElement === kCellAt(1, 'return_qty'),
+            `焦点=${kFieldOf(doc.activeElement)}`);
+    }
+
+    // ③ 料号格（可搜索下拉）手打值直接回车 → 回填照旧 + 新增一行
+    const kR3 = dataRows() - 1;
+    const kC3 = kCellAt(kR3, 'material_no');
+    check('找到最后一行的料号格', !!kC3, kC3 ? '存在' : '(未找到)');
+    if (kC3) {
+      kC3.focus();
+      kC3.value = '10001-0001';
+      kC3.dispatchEvent(new W.Event('input', { bubbles: true }));
+      await sleep(700);
+      kEnterOn(kC3);
+      await sleep(1500);
+      check('料号格回车照旧回填（回车换行没有把它挤掉）',
+            kValAt(kR3, 'product_model') === '51177.67.773C',
+            `型号=${kValAt(kR3, 'product_model')}`);
+      check('料号格回车同样新增一行',
+            dataRows() === kR3 + 2, `${kR3 + 1} → ${dataRows()}`);
+
+      // ④ 键盘在候选面板里回车「选中候选」的那次不算换行（再按一次才换行）
+      const kR4 = dataRows() - 1;
+      const kC4 = kCellAt(kR4, 'material_no');
+      check('找到新行的料号格（第 ④ 步的前提）', !!kC4, kC4 ? '存在' : '(未找到)');
+      if (kC4) {
+      kC4.focus();
+      kC4.value = '1000';
+      kC4.dispatchEvent(new W.Event('input', { bubbles: true }));
+      await sleep(700);
+      kC4.dispatchEvent(new W.KeyboardEvent('keydown',
+        { key: 'ArrowDown', bubbles: true }));   // 激活候选
+      await sleep(150);
+      kEnterOn(kC4);
+      await sleep(900);
+      check('用键盘选中候选的那次回车不新增行（避免选候选时多出空行）',
+            dataRows() === kR4 + 1, `仍为 ${kR4 + 1} 行`);
+      }
+    }
+
+    // ⑤ 回车新增后焦点落到新行的可搜索下拉格 —— 面板不该自动弹开
+    //    （程序化聚焦不弹；用户点击 / 手动输入时才弹）
+    const kE0 = dataRows();
+    const kE1 = kCellAt(kE0 - 1, 'material_no');
+    check('末行料号格是可搜索下拉（第 ⑤ 步的前提）',
+          !!kE1 && !!kE1.closest('.cb'),
+          kE1 ? (kE1.closest('.cb') ? '有面板' : '无面板') : '(未找到)');
+    if (kE1 && kE1.closest('.cb')) {
+      kE1.value = '';
+      kE1.dispatchEvent(new W.Event('input', { bubbles: true }));
+      kEnterOn(kE1);
+      await sleep(700);
+      const kNewCell = kCellAt(dataRows() - 1, 'material_no');
+      const kPanel = kNewCell && kNewCell.closest('.cb')
+        ? kNewCell.closest('.cb').querySelector('.cb__panel') : null;
+      check('回车新增后，新行的候选面板不会自动弹开',
+            !!kPanel && kPanel.classList.contains('hidden'),
+            kPanel ? (kPanel.classList.contains('hidden')
+                      ? '面板保持收起' : '🔴 面板被弹开了') : '(未找到面板)');
+    }
+
+    // ---- 自动匹配栏（2026-09-20 新增）----
+    // 规则：带「|」的合并码（料号|产品编号）拆成一行产品的两格；
+    //       其余条码走通用匹配（快递单号回填整单信息 / 其他条码新增一行）。
+    console.log('\n[交互] 退回登记 · 自动匹配栏');
+    btnClear.click();
+    await sleep(400);
+
+    const kBarInput = doc.querySelector('.scan-bar__input');
+    const kBarStatus = () => (doc.querySelector('.scan-bar__status') || {}).textContent || '';
+    check('顶部有自动匹配栏（输入框 + 匹配按钮）',
+          !!kBarInput && !!doc.querySelector('.scan-bar .btn'),
+          kBarInput ? '存在' : '(未找到)');
+    check('匹配栏排在「整单信息」之上',
+          !!doc.querySelector('.scan-bar') && !!doc.querySelector('#header-host')
+          && (doc.querySelector('.scan-bar').compareDocumentPosition(
+                doc.querySelector('#header-host'))
+              & 4) === 4,
+          '位置正确');
+
+    if (kBarInput) {
+      const kBarScan = async (text, waitMs = 1800) => {
+        kBarInput.value = text;
+        kBarInput.dispatchEvent(new W.KeyboardEvent('keydown',
+          { key: 'Enter', bubbles: true }));
+        await sleep(waitMs);
+      };
+
+      // ① 合并码 → 拆成一行产品的「料号 / 产品编号」
+      kBarInput.focus();
+      const kB0 = dataRows();
+      await kBarScan('10006-0021|231006937');
+      check('扫「料号|产品编号」→ 新增一行', dataRows() === kB0 + 1, `${kB0} → ${dataRows()}`);
+      check('拆分：左段进「料号」', kValAt(kB0, 'material_no') === '10006-0021',
+            `料号=${kValAt(kB0, 'material_no')}`);
+      check('拆分：右段进「产品编号」', kValAt(kB0, 'product_code') === '231006937',
+            `产品编号=${kValAt(kB0, 'product_code')}`);
+      check('料号照旧自动回填（型号 / 品名）',
+            kValAt(kB0, 'product_model') === 'BLJJ 08.M18'
+            && kValAt(kB0, 'product_name') === '电感式接近开关',
+            `型号=${kValAt(kB0, 'product_model')} 品名=${kValAt(kB0, 'product_name')}`);
+      check('产品编号照旧解析生产年月',
+            kValAt(kB0, 'production_year') === '2023'
+            && kValAt(kB0, 'production_month') === '10月',
+            `${kValAt(kB0, 'production_year')} / ${kValAt(kB0, 'production_month')}`);
+      check('扫完自动清空输入框（可连着扫）', kBarInput.value === '',
+            `剩余=${JSON.stringify(kBarInput.value)}`);
+      check('扫完焦点留在匹配栏', doc.activeElement === kBarInput, '焦点在栏内');
+      check('状态行汇报拆分结果', /已拆分/.test(kBarStatus()), kBarStatus().slice(0, 60));
+
+      // ② 快递单号 → 回填整单信息（先造一条带该单号的历史记录）
+      const kStamp = Date.now();
+      const kWaybill = `SF${kStamp}`;
+      let kBarKey = null;
+      try {
+        const r = await authFetch(BASE + '/api/returns/batch', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            header: { return_no: kWaybill, return_date: new Date().toISOString().slice(0, 10),
+                      turbine_vendor: 'BAR-VENDOR', project_site: 'BAR-SITE' },
+            items: [{ product_code: `BAR-${kStamp}`, material_no: '10006-0021' }],
+          }),
+        });
+        const j = await r.json();
+        kBarKey = (j.detail_keys || [])[0] || null;
+      } catch { /* 下面统一报错 */ }
+      check('准备一条带该快递单号的历史记录', !!kBarKey, kBarKey || '创建失败');
+
+      if (kBarKey) {
+        const kRn = doc.querySelector('[data-field="return_no"]');
+        kRn.value = '';
+        kRn.dispatchEvent(new W.Event('input', { bubbles: true }));
+        await sleep(300);
+        await kBarScan(kWaybill);
+        check('扫快递单号 → 回填「退回单号」', kRn.value === kWaybill, `退回单号=${kRn.value}`);
+        check('历史带出风机厂家（整单信息一并回填）',
+              (doc.querySelector('[data-field="turbine_vendor"]') || {}).value === 'BAR-VENDOR',
+              `风机厂家=${(doc.querySelector('[data-field="turbine_vendor"]') || {}).value}`);
+        check('状态行汇报已回填整单信息', /已回填/.test(kBarStatus()), kBarStatus().slice(0, 60));
+
+        // ③ 退回单号已有别的值时：不覆盖，只提示
+        kRn.value = 'KEEP-ME-123';
+        kRn.dispatchEvent(new W.Event('input', { bubbles: true }));
+        await sleep(300);
+        await kBarScan(kWaybill);
+        check('退回单号已有别的值时不覆盖', kRn.value === 'KEEP-ME-123',
+              `退回单号=${kRn.value}`);
+        check('未覆盖时状态行明确提示', /未覆盖/.test(kBarStatus()), kBarStatus().slice(0, 70));
+
+        try {
+          await authFetch(BASE + '/api/returns/' + encodeURIComponent(kBarKey),
+                          { method: 'DELETE' });
+        } catch { /* 清理失败不影响结论 */ }
+      }
+
+      // ④-2 历史里查不到的条码 → **不猜**，弹选择条让用户定
+      const kC0 = dataRows();
+      const kUnknown = `ZZUNKNOWN${Date.now()}`;
+      await kBarScan(kUnknown);
+      check('查不到的条码不会自作主张新增行', dataRows() === kC0, `仍为 ${kC0} 行`);
+      const kAsk = doc.querySelector('#match-banner .match-banner__actions');
+      check('提示框给出「当快递单号 / 当产品」两个选择',
+            !!kAsk, kAsk ? kAsk.textContent : '(未找到)');
+      if (kAsk) {
+        const kBtnOf = kw => [...kAsk.querySelectorAll('button')]
+          .find(b => b.textContent.includes(kw));
+        const kRnX = doc.querySelector('[data-field="return_no"]');
+        kRnX.value = '';
+        kRnX.dispatchEvent(new W.Event('input', { bubbles: true }));
+        await sleep(250);
+        kBtnOf('快递单号').click();
+        await sleep(500);
+        check('选「当快递单号」→ 填入「退回单号」', kRnX.value === kUnknown,
+              `退回单号=${kRnX.value}`);
+        check('选完后选择条收起',
+              !doc.querySelector('#match-banner .match-banner__actions'), '已收起');
+
+        // 同一个条码再扫一次：照样问（不记住上次选择），这次选「新增一行产品」
+        const kP0 = dataRows();
+        await kBarScan(kUnknown);
+        const kAsk2 = doc.querySelector('#match-banner .match-banner__actions');
+        check('同一个条码再扫仍会问（不擅自沿用上次的选择）',
+              !!kAsk2, kAsk2 ? '再次出现选择条' : '(未出现)');
+        if (kAsk2) {
+          [...kAsk2.querySelectorAll('button')]
+            .find(b => b.textContent.includes('产品')).click();
+          await sleep(500);
+          check('选「当产品」→ 增加一行且条码落进产品编号',
+                dataRows() === kP0 + 1
+                && kValAt(dataRows() - 1, 'product_code') === kUnknown,
+                `${kP0} → ${dataRows()}，产品编号=${kValAt(dataRows() - 1, 'product_code')}`);
+        }
+      }
+
+      // ④ 焦点不在匹配栏时（全局扫码枪），合并码同样能拆
+      const kB4 = dataRows();
+      kBarInput.blur();
+      const gunCode = '10002-0079|250912894';
+      for (const ch of gunCode) {
+        doc.dispatchEvent(new W.KeyboardEvent('keydown', { key: ch, bubbles: true }));
+        await sleep(12);
+      }
+      await sleep(2000);
+      check('扫码枪（焦点不在栏内）扫合并码同样拆成一行',
+            dataRows() === kB4 + 1, `${kB4} → ${dataRows()}`);
+      check('扫码枪拆分结果同样正确',
+            kValAt(dataRows() - 1, 'material_no') === '10002-0079'
+            && kValAt(dataRows() - 1, 'product_code') === '250912894',
+            `料号=${kValAt(dataRows() - 1, 'material_no')} 产品编号=${kValAt(dataRows() - 1, 'product_code')}`);
+    }
 
     btnClear.click();
     await sleep(400);

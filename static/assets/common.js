@@ -4,6 +4,11 @@
 
 const API = '/api';
 
+/* 站点英文标题 —— **只有这一处定义**，侧栏与登录页共用（login.html 也引本文件）。
+   改标题只改这里，避免两处各写一份而漂移。
+   2026-09-20：由「After-sales Return System」改为含公司名与 Registration 的全称。 */
+const SITE_TITLE_EN = 'Beiliang After-Sales Return Registration System';
+
 /* ---------------- 请求 ---------------- */
 async function api(path, opts = {}) {
   const opt = { headers: {}, ...opts };
@@ -362,7 +367,20 @@ function combobox(opts) {
     input.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
-  input.addEventListener('focus', open);
+  /* 程序化聚焦（如「回车新增一行」后把光标放到新行的格子）时不该弹面板 ——
+     面板只在用户点击 / 手动输入时出现。调用方先 suppresseOpenOnce() 再 focus()
+     即可；用 setTimeout 兜底清标记，避免「聚焦时元素已聚焦、focus 事件没触发」
+     导致标记残留、把下一次真正的聚焦也吞掉。
+     注意 click 分支不设此限制：用户主动点格子，面板照旧弹出。 */
+  let skipFocusOpen = false;
+  wrap.suppressOpenOnce = () => {
+    skipFocusOpen = true;
+    setTimeout(() => { skipFocusOpen = false; }, 0);
+  };
+  input.addEventListener('focus', () => {
+    if (skipFocusOpen) { skipFocusOpen = false; return; }
+    open();
+  });
   input.addEventListener('click', open);
   input.addEventListener('input', () => {
     const now = Date.now();
@@ -393,6 +411,11 @@ function combobox(opts) {
       fastStreak = 0;                       // 扫码结束，恢复正常输入判定
       if (activeIdx >= 0) {
         e.preventDefault();
+        // 在事件上留个记号：这次回车是「从候选里选一个」，不是「提交手打的
+        // 值」。外层（如退回登记明细表的回车换行）据此跳过「回车开新行」——
+        // 否则用键盘选中候选会顺手多出一行。事件对象会继续冒泡，所以记号
+        // 能被委托在外层的监听器读到。
+        e.cbPicked = true;
         if (extra && activeIdx === 0) pick(input.value.trim());
         else if (list[activeIdx - extra]) pick(list[activeIdx - extra].value);
       } else if (onEnter) {
@@ -729,10 +752,14 @@ function renderSidebar(activeKey) {
 
   const bar = h('aside', { class: 'sidebar' }, [
     h('div', { class: 'sidebar__brand' }, [
-      h('div', { class: 'sidebar__logo' }, '返'),
+      // 主图标 = 公司商标的图形部分（不带下方文字：这里只有 26px，
+      // 带文字必糊）。图形是亮蓝 #0080c8 —— 2026-09-20 侧栏由深色改浅色后
+      // 重新核对过：亮蓝压在 #f6f8fa 上对比度约 3.6:1，达到图形类元素的门槛。
+      h('img', { class: 'sidebar__logo', src: '/static/assets/logo.png?v=20260920f',
+                 alt: '贝良', width: 26, height: 26 }),
       h('div', {}, [
         h('div', { class: 'sidebar__title' }, '售后返件系统'),
-        h('div', { class: 'sidebar__sub' }, 'After-sales Return'),
+        h('div', { class: 'sidebar__sub' }, SITE_TITLE_EN),
       ]),
     ]),
     h('nav', { class: 'nav' }, [
@@ -932,10 +959,18 @@ function section(title, badge, bodyNode, collapsed = false) {
 }
 
 /* ---------------- 图表工具 ---------------- */
+/* 图表色板 = GitHub Primer 的**数据可视化**专用色（data-viz emphasis 系列）。
+ *
+ * 为什么不用界面那套（--brand / --success）：界面色是为「文本与图标」调的，
+ * 放到面积色块上会偏深偏闷；Primer 专门备了一组彩度更高、彼此区分度更大的
+ * 数据色，正是给图表用的。顺序按「相邻色相差最大」排，这样默认分配
+ * （第 i 个系列取第 i 个色）时相邻两项不会撞色。
+ *
+ * 注意：这里是**数据色**，不要跟 UI 主题色混用 —— 改主题时不必动它。 */
 const CHART_COLORS = [
-  '#185fa5', '#0f6e56', '#ba7517', '#a32d2d', '#534ab7',
-  '#1d9e75', '#d85a30', '#378add', '#8b5cf6', '#d4537e',
-  '#639922', '#0e7490', '#c2410c', '#4f46e5', '#be123c',
+  '#006edb', '#30a147', '#eb670f', '#df0c24', '#894ceb',
+  '#179b9b', '#ce2c85', '#b88700', '#527a29', '#d43511',
+  '#a830e8', '#808fa3', '#167e53', '#856d4c', '#866e04',
 ];
 
 function baseChartOptions(extra = {}) {
@@ -945,22 +980,22 @@ function baseChartOptions(extra = {}) {
     animation: { duration: 320 },
     plugins: {
       legend: {
-        labels: { font: { size: 11 }, boxWidth: 12, padding: 10, color: '#5b6472' },
+        labels: { font: { size: 11 }, boxWidth: 12, padding: 10, color: '#59636e' },
       },
       tooltip: {
-        backgroundColor: '#26303d', titleFont: { size: 12 }, bodyFont: { size: 12 },
+        backgroundColor: '#25292e', titleFont: { size: 12 }, bodyFont: { size: 12 },
         padding: 9, cornerRadius: 6, displayColors: true,
       },
     },
     scales: {
       x: {
-        ticks: { font: { size: 11 }, color: '#5b6472', maxRotation: 0, autoSkip: true },
-        grid: { display: false }, border: { color: '#e3e6ea' },
+        ticks: { font: { size: 11 }, color: '#59636e', maxRotation: 0, autoSkip: true },
+        grid: { display: false }, border: { color: '#d1d9e0' },
       },
       y: {
         beginAtZero: true,
-        ticks: { font: { size: 11 }, color: '#5b6472', precision: 0 },
-        grid: { color: '#eef1f4' }, border: { display: false },
+        ticks: { font: { size: 11 }, color: '#59636e', precision: 0 },
+        grid: { color: '#eff2f5' }, border: { display: false },
       },
     },
   }, extra);

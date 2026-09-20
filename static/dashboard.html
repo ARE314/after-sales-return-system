@@ -4,18 +4,21 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>数据看板 · 售后返件登记系统</title>
-<link rel="stylesheet" href="/static/assets/app.css??v=20260920e">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260920p">
+  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260920p">
+<link rel="stylesheet" href="/static/assets/app.css?v=20260920p">
 <style>
   .chart-scroll { max-height: 340px; overflow-y: auto; overflow-x: hidden; padding-right: 4px; }
   .chart-scroll::-webkit-scrollbar { width: 7px; }
-  .chart-scroll::-webkit-scrollbar-thumb { background: #cfd6de; border-radius: 4px; }
+  .chart-scroll::-webkit-scrollbar-thumb { background: #d1d9e0; border-radius: 4px; }
   .chart-grid-2 { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); }
   .chart-grid-3 { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
 </style>
 </head>
 <body>
-<script src="/static/assets/lib/chart.umd.js??v=20260920e"></script>
-<script src="/static/assets/common.js??v=20260920e"></script>
+<script src="/static/assets/lib/chart.umd.js?v=20260920p"></script>
+<script src="/static/assets/common.js?v=20260920p"></script>
 <script>
 (async () => {
   const granularitySel = h('select', {
@@ -75,8 +78,8 @@
         { id: 'c-trend', title: '返件趋势', hint: '按退回时间', span: 'full',
           box: 'chart-box--h260', type: 'line', src: 'trend',
           series: [
-            { label: '返件条数', key: 'value', color: '#185fa5', fill: true },
-            { label: '退回数量', key: 'qty', color: '#0f6e56', dash: true },
+            { label: '返件条数', key: 'value', color: '#006edb', fill: true },
+            { label: '退回数量', key: 'qty', color: '#30a147', dash: true },
           ] },
         // 产品类别用横条图（有数量轴，能读出具体条数）；原先那张同数据的
         // 饼图已随之去掉 —— 两张图讲同一件事只会占地方
@@ -120,7 +123,7 @@
         /* ---- 工作量 ---- */
         { id: 'c-trend', title: '检测趋势', hint: '按检测时间', span: 'full',
           box: 'chart-box--h260', type: 'line', src: 'trend',
-          series: [{ label: '检测条数', key: 'value', color: '#0f6e56', fill: true }] },
+          series: [{ label: '检测条数', key: 'value', color: '#30a147', fill: true }] },
 
         /* ---- 谁在返检：厂家 → 产品 ---- */
         { id: 'c-vendor', title: 'TOP 厂家', hint: '按检测条数', span: 'half',
@@ -371,13 +374,13 @@
         labels,
         datasets: [
           { label: '退回条数', data: labels.map(l => m1.get(l) || 0),
-            borderColor: '#185fa5', backgroundColor: hexA('#185fa5', .12),
+            borderColor: '#006edb', backgroundColor: hexA('#006edb', .12),
             borderWidth: 2, fill: true, tension: .3, pointRadius: 3,
-            pointBackgroundColor: '#185fa5', pointHoverRadius: 5 },
+            pointBackgroundColor: '#006edb', pointHoverRadius: 5 },
           { label: '检测条数', data: labels.map(l => m2.get(l) || 0),
-            borderColor: '#0f6e56', backgroundColor: 'transparent',
+            borderColor: '#30a147', backgroundColor: 'transparent',
             borderWidth: 2, borderDash: [5, 4], fill: false, tension: .3,
-            pointRadius: 3, pointBackgroundColor: '#0f6e56', pointHoverRadius: 5 },
+            pointRadius: 3, pointBackgroundColor: '#30a147', pointHoverRadius: 5 },
         ],
       },
       options: baseChartOptions(),
@@ -402,10 +405,10 @@
         plugins: {
           legend: {
             position: 'right',
-            labels: { font: { size: 11 }, boxWidth: 11, padding: 8, color: '#5b6472' },
+            labels: { font: { size: 11 }, boxWidth: 11, padding: 8, color: '#59636e' },
           },
           tooltip: {
-            backgroundColor: '#26303d', padding: 9, cornerRadius: 6,
+            backgroundColor: '#25292e', padding: 9, cornerRadius: 6,
             callbacks: {
               label: ctx => {
                 const total = ctx.dataset.data.reduce((a, b) => a + b, 0);
@@ -443,26 +446,26 @@
         plugins: {
           legend: { display: false },
           tooltip: {
-            backgroundColor: '#26303d', padding: 9, cornerRadius: 6,
+            backgroundColor: '#25292e', padding: 9, cornerRadius: 6,
             callbacks: { label: ctx => ` ${ctx.parsed.x} 条` },
           },
         },
         scales: {
           x: {
             beginAtZero: true,
-            ticks: { font: { size: 11 }, color: '#5b6472', precision: 0 },
-            grid: { color: '#eef1f4' }, border: { display: false },
+            ticks: { font: { size: 11 }, color: '#59636e', precision: 0 },
+            grid: { color: '#eff2f5' }, border: { display: false },
           },
           y: {
             ticks: {
-              font: { size: 11 }, color: '#3d4653', autoSkip: false,
+              font: { size: 11 }, color: '#59636e', autoSkip: false,
               crossAlign: 'far',
               callback: function (v) {
                 const s = String(this.getLabelForValue(v) ?? '');
                 return s.length > 16 ? s.slice(0, 15) + '…' : s;
               },
             },
-            grid: { display: false }, border: { color: '#e3e6ea' },
+            grid: { display: false }, border: { color: '#d1d9e0' },
           },
         },
       }),
@@ -491,25 +494,25 @@
       },
       options: baseChartOptions({
         plugins: {
-          legend: { labels: { font: { size: 11 }, boxWidth: 11, padding: 8, color: '#5b6472' } },
-          tooltip: { backgroundColor: '#26303d', padding: 9, cornerRadius: 6 },
+          legend: { labels: { font: { size: 11 }, boxWidth: 11, padding: 8, color: '#59636e' } },
+          tooltip: { backgroundColor: '#25292e', padding: 9, cornerRadius: 6 },
         },
         scales: {
           x: {
             stacked: true,
             ticks: {
-              font: { size: 11 }, color: '#5b6472', autoSkip: false, maxRotation: 0,
+              font: { size: 11 }, color: '#59636e', autoSkip: false, maxRotation: 0,
               callback: function (v) {
                 const s = String(this.getLabelForValue(v) ?? '');
                 return s.length > 8 ? s.slice(0, 7) + '…' : s;
               },
             },
-            grid: { display: false }, border: { color: '#e3e6ea' },
+            grid: { display: false }, border: { color: '#d1d9e0' },
           },
           y: {
             stacked: true, beginAtZero: true,
-            ticks: { font: { size: 11 }, color: '#5b6472', precision: 0 },
-            grid: { color: '#eef1f4' }, border: { display: false },
+            ticks: { font: { size: 11 }, color: '#59636e', precision: 0 },
+            grid: { color: '#eff2f5' }, border: { display: false },
           },
         },
       }),
@@ -566,7 +569,7 @@
         barRow(p.label, p.value, p.value / total,
                CHART_COLORS[i % CHART_COLORS.length]));
       if (v.others > 0) {
-        rows.push(barRow('其他', v.others, v.others / total, '#c3ccd6'));
+        rows.push(barRow('其他', v.others, v.others / total, '#808fa3'));
       }
       return h('div', { class: 'vpitem' }, [
         h('div', { class: 'vpitem__head' }, [

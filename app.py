@@ -32,7 +32,7 @@ from fastapi.responses import (FileResponse, JSONResponse, RedirectResponse,
                                StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 
-from config import (CARRIER_OPTIONS, CARRIER_PREFIX_RULES,
+from config import (BASE_DIR, CARRIER_OPTIONS, CARRIER_PREFIX_RULES,
                     CODE_PERIOD_CENTURY, CODE_PERIOD_MONTH_SUFFIX,
                     CODE_PERIOD_PREFIX_LEN, COOKIE_SECURE, CORS_ALLOW_ORIGINS,
                     DEFAULT_REGISTRAR, FIELD_LABELS, FIXED_OPTIONS,
@@ -212,12 +212,18 @@ async def no_cache_static(request, call_next):
     本地工具升级频繁，若浏览器沿用旧缓存会出现「改了没生效」的假象，
     这里统一要求每次带 ETag 回源校验（未变返回 304，变了返回新内容）。
 
-    例外：`/photos` 下的照片文件名唯一且内容不变（改了就是新文件名），
-    可以放心让浏览器强缓存，避免每次翻页都重新拉图。
+    例外（可强缓存，避免每次开页面都重新拉）：
+    * `/photos/` —— 照片文件名唯一且内容不变（改了就是新文件名）；
+    * `/favicon.ico` —— 站点图标几乎不变，且它在**每个**页面加载时都会被请求。
+
+    注意：这里会**覆盖**路由上设的 Cache-Control。所以给某个路径开强缓存时，
+    必须同时把它加进下面这个判断，否则路由里的设置会被静默抹掉
+    （表现是「我明明设了缓存，network 里还是每次 200」）。
     """
     response = await call_next(request)
     path = request.url.path
-    if not path.startswith("/api/") and not path.startswith("/photos/"):
+    cacheable = (path.startswith("/photos/") or path == "/favicon.ico")
+    if not path.startswith("/api/") and not cacheable:
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
     return response
 
@@ -248,7 +254,10 @@ FIELD_DEFS = {
     # search-item = 可搜索下拉 + 候选实时检索（与检测登记的模糊匹配同一套交互）：
     #   source=items   候选来自匹配数据库（物料主档 1735 条），输入片段即模糊匹配；
     #   source=history 候选来自本字段历史登记过的值（实时去重，非字典表）。
-    "product_code": {"type": "search-item", "source": "history",
+    # 产品编号 = 铭牌序列号，**不做候选下拉**（2026-09-20 用户确认）：
+    # 历史上每个编号基本只出现一次，模糊候选只会干扰，还可能误选到别的序列号。
+    # 扫码 / 手打直接落格；回车照旧解析生产年月。
+    "product_code": {"type": "text",
                      "placeholder": "扫描铭牌条码", "scan": True},
     "material_no": {"type": "search-item", "source": "items",
                     "placeholder": "料号 / 关键字搜索", "scan": True},
@@ -1402,6 +1411,26 @@ def index():
 # （`%2F` 形式挡得住是因为 uvicorn 先解码成 `/`，正则会失配 —— 但那是巧合，
 #   不是设计。）
 _PAGE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+# 站点图标走独立路由，不能靠下面的 `/{page}.html`。
+# 那条路由**只匹配以 .html 结尾的路径**，所以 /favicon.ico 根本到不了它 ——
+# 而 PUBLIC_PATHS 里早就写了 "/favicon.ico"（原意是「放行它」），
+# 结果就是「白名单里有个永远不存在的路由」：浏览器每次开页面都拿 404，
+# 服务端日志里也看不出毛病。实测确认过这一点（404 / {"detail":"Not Found"}）。
+#
+# 文件放在**项目根**（与 data/photos/ 同一模式：根下实体 + 独立路由），
+# 不放 static/ —— URL 是 /favicon.ico，根下同名文件与 URL 一一对应，
+# 测试脚本与后来的人都不用再想「这个 URL 到底映射到哪」。
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    path = BASE_DIR / "favicon.ico"
+    if not path.is_file():
+        raise HTTPException(404, "favicon 不存在")
+    # 图标基本不变，给它一点强缓存，省掉每个页面加载时的一次请求
+    # （no_cache_static 中间件里同步放行了这个路径，否则这里会被覆盖）
+    return FileResponse(str(path), media_type="image/x-icon",
+                        headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/{page}.html")

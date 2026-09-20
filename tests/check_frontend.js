@@ -108,6 +108,49 @@ if (assetVersions.size === 1) {
 /* 4. 关键 API 路径一致性 */
 console.log('\n[4] 前后端接口一致性');
 const appSrc = fs.readFileSync(path.join(ROOT, 'app.py'), 'utf8');
+/* 3c. 站点图标（favicon）现在**真的**能取到
+ *
+ * 背景：PUBLIC_PATHS 里一直写着 "/favicon.ico"（本意是「放行它」），
+ * 但服务端**从来没有这条路由** —— `/{page}.html` 只匹配 .html 结尾的路径，
+ * 所以 /favicon.ico 落到 404，而日志里看不出任何毛病（HTTP 404 不是异常）。
+ * 浏览器每次开页面都在拉一个不存在的东西，一直没人发现。
+ * 这里同时守住「文件在」与「有路由」两件事：少任何一件都是 404。 */
+console.log('\n[3c] 站点图标');
+const iconFile = path.join(ROOT, 'favicon.ico');
+if (fs.existsSync(iconFile)) {
+  const sz = fs.statSync(iconFile).size;
+  ok(`favicon.ico 存在于项目根（${sz} 字节）`);
+} else {
+  bad('favicon.ico 不在项目根 —— /favicon.ico 会 404（路由按 BASE_DIR 取文件）');
+}
+if (/@app\.get\(\s*"\/favicon\.ico"/.test(appSrc)) {
+  ok('后端有 /favicon.ico 路由');
+} else {
+  bad('后端缺少 /favicon.ico 路由（白名单里放行了它，但没人处理它）');
+}
+{
+  // 每个页面都应引用图标；否则那一页的页签是空白默认图标
+  const noIcon = PAGES.filter(p => {
+    const h = fs.readFileSync(path.join(ROOT, 'static', p), 'utf8');
+    return !/rel="icon"/.test(h);
+  });
+  if (noIcon.length === 0) ok(`全部 ${PAGES.length} 个页面都引用了 favicon`);
+  else bad(`未引用 favicon 的页面：${noIcon.join(', ')}`);
+}
+{
+  // 主图标图片必须在，且被两个入口引用（侧边栏 + 登录页）
+  const png = path.join(ROOT, 'static', 'assets', 'logo.png');
+  if (!fs.existsSync(png)) {
+    bad('static/assets/logo.png 不存在（主图标图）');
+  } else {
+    const common = fs.readFileSync(path.join(ROOT, 'static', 'assets', 'common.js'), 'utf8');
+    const login = fs.readFileSync(path.join(ROOT, 'static', 'login.html'), 'utf8');
+    const used = /assets\/logo\.png/.test(common) && /assets\/logo\.png/.test(login);
+    if (used) ok('主图标被侧边栏与登录页共同引用');
+    else bad('主图标未被侧边栏或登录页引用（换了图但没接上）');
+  }
+}
+
 const routes = new Set();
 const ROUTE = /@app\.(get|post|put|delete)\(\s*"([^"]+)"/g;
 let r;

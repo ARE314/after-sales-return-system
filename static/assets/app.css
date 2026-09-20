@@ -3,40 +3,70 @@
    浅色主题 · 紧凑办公风格
    ============================================================ */
 :root {
-  --bg-page: #f4f5f7;
-  --bg-card: #ffffff;
-  --bg-subtle: #fafbfc;
-  --bg-hover: #f0f3f6;
-  --bg-active: #e8f0fa;
+  /* ---- 取色全部对齐 GitHub Primer（light theme）----
+     原则：中性色打底、单一蓝色强调、状态色只用在真正需要区分的地方。
+     色值来源是 GitHub 官方设计体系的功能令牌（--bgColor-* / --fgColor-* /
+     --borderColor-*），不是目测调的 —— 这样日后想核对「这个灰是不是对的」
+     有据可查。改色时优先改这里，别在下面写死。 */
+  --bg-page: #f6f8fa;          /* Primer bgColor-inset */
+  --bg-card: #ffffff;          /* Primer bgColor-default */
+  --bg-subtle: #f6f8fa;        /* Primer bgColor-muted */
+  --bg-hover: #eff2f5;         /* Primer control-bgColor-hover */
+  --bg-active: #ddf4ff;        /* Primer bgColor-accent-muted */
+  --bg-emphasis: #25292e;      /* Primer bgColor-emphasis（提示条底色）*/
 
-  --text-primary: #1f2328;
-  --text-secondary: #5b6472;
-  --text-tertiary: #8b95a3;
+  --text-primary: #1f2328;     /* Primer fgColor-default */
+  --text-secondary: #59636e;   /* Primer fgColor-muted */
+  --text-tertiary: #818b98;    /* Primer fgColor-subtle */
   --text-inverse: #ffffff;
 
-  --border: #e3e6ea;
-  --border-strong: #d0d5db;
+  --border: #d1d9e0;           /* Primer borderColor-default */
+  --border-strong: #818b98;    /* Primer borderColor-emphasis */
 
-  --brand: #185fa5;
-  --brand-light: #e6f1fb;
-  --brand-hover: #14508c;
+  --brand: #0969da;            /* Primer accent —— 与商标主色 #0080c8 同一色系 */
+  --brand-light: #ddf4ff;      /* Primer bgColor-accent-muted */
+  --brand-hover: #0860ca;      /* Primer control-checked-bgColor-hover */
 
-  --success: #0f6e56;
-  --success-light: #e1f5ee;
-  --warning: #ba7517;
-  --warning-light: #faeeda;
-  --danger: #a32d2d;
-  --danger-light: #fcebeb;
-  --info: #534ab7;
-  --info-light: #eeedfe;
+  --success: #1a7f37;          /* Primer fgColor-success */
+  --success-light: #dafbe1;    /* Primer bgColor-success-muted */
+  --warning: #9a6700;          /* Primer fgColor-attention */
+  --warning-light: #fff8c5;    /* Primer bgColor-attention-muted */
+  --danger: #d1242f;           /* Primer fgColor-danger */
+  --danger-light: #ffebe9;     /* Primer bgColor-danger-muted */
+  --info: #8250df;             /* Primer fgColor-done */
+  --info-light: #fbefff;       /* Primer bgColor-done-muted */
 
+  /* 浅色底上的**文字**色：Primer 的 fg 色直接放在 muted 底上对比度不够
+     （约 3.4~4.0），所以另备一组更深的值，专供浅底文字用。 */
+  --success-text: #116329;
+  --warning-text: #7d4e00;
+  --danger-text: #a40e26;
+  /* 浅色底上的**描边**色（Primer 的 muted 边框，40% 透明度） */
+  --success-border: rgba(74, 194, 107, .4);
+  --warning-border: rgba(212, 167, 44, .4);
+  --danger-border: rgba(255, 129, 130, .4);
+
+  /* 焦点环：跟着品牌蓝走 */
+  --focus-ring: rgba(9, 105, 218, .15);
+
+  /* 提示条底色：Primer 的 bgColor-*-emphasis，专门配白字用
+     （比 fgColor 系列深一档，白字才够对比度） */
+  --toast-success: #1f883d;
+  --toast-danger: #cf222e;
+  --toast-warning: #9a6700;
+
+  /* 圆角统一 6px —— Primer 的规范值。原先 6/10/14 三档并存，
+     同一屏里出现三种圆角会让界面显得碎。 */
   --radius-sm: 6px;
-  --radius: 10px;
-  --radius-lg: 14px;
+  --radius: 6px;
+  --radius-lg: 6px;
 
-  --shadow-sm: 0 1px 2px rgba(16, 24, 40, .06);
-  --shadow: 0 2px 8px rgba(16, 24, 40, .08);
-  --shadow-lg: 0 8px 28px rgba(16, 24, 40, .14);
+  /* 阴影收敛到 Primer 的强度（原先明显更重，会让卡片「浮」起来） */
+  --shadow-sm: 0 1px 1px rgba(31, 35, 40, .04), 0 1px 2px rgba(31, 35, 40, .03);
+  --shadow: 0 1px 1px rgba(37, 41, 46, .10), 0 3px 6px rgba(37, 41, 46, .12);
+  --shadow-lg: 0 0 0 1px rgba(209, 217, 224, .25),
+               0 6px 12px -3px rgba(37, 41, 46, .04),
+               0 6px 18px rgba(37, 41, 46, .12);
 
   --sidebar-w: 208px;
   --header-h: 56px;
@@ -66,8 +96,11 @@ a { color: var(--brand); text-decoration: none; }
 .sidebar {
   width: var(--sidebar-w);
   flex-shrink: 0;
-  background: #1c2430;
-  color: #c9d1dc;
+  /* 2026-09-20 由深色 #1c2430 改为浅色：与 github.com 浅色模式一致。
+     侧栏与内容之间改用右边框分隔（原来靠明暗对比分隔）。 */
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow-y: auto;
@@ -78,43 +111,54 @@ a { color: var(--brand); text-decoration: none; }
   align-items: center;
   gap: 9px;
   padding: 0 16px;
-  border-bottom: 1px solid rgba(255, 255, 255, .08);
+  border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
+/* 主图标 = 公司商标图形（static/assets/logo.png，由商标图裁出、去掉了下方文字）。
+   它本身就是彩色图形，所以这里有**意**不再画渐变底 / 圆角 / 文字 —— 那些是
+   原来放「返」字时用的样式，留着会在图形外面套一个蓝方块。
+   透明底 + 原始配色，因此在深色侧栏与浅色登录卡上都直接可用，无需换图。 */
 .sidebar__logo {
   width: 26px; height: 26px;
-  border-radius: 7px;
-  background: linear-gradient(135deg, #378add, #185fa5);
-  display: grid; place-items: center;
-  font-size: 13px; font-weight: 700; color: #fff;
+  display: block;
   flex-shrink: 0;
+  object-fit: contain;
 }
-.sidebar__title { font-size: 13.5px; font-weight: 600; color: #fff; letter-spacing: .2px; }
-.sidebar__sub { font-size: 10.5px; color: #7d8794; margin-top: -2px; }
+.sidebar__title { font-size: 13.5px; font-weight: 500; color: var(--text-primary); letter-spacing: .2px; }
+/* 全称较长（48 字符），侧栏文字区只有 ~141px —— 会折成两行，行距收紧些。
+   2026-09-20 随英文标题改为全称一起调整。 */
+.sidebar__sub {
+  font-size: 10.5px; color: var(--text-tertiary); margin-top: -2px;
+  line-height: 1.25;
+}
 
 .nav { padding: 10px 8px; flex: 1; }
 .nav__label {
-  font-size: 10.5px; color: #6b7686;
+  font-size: 10.5px; color: var(--text-tertiary);
   padding: 12px 10px 6px; letter-spacing: .5px;
 }
 .nav__item {
   display: flex; align-items: center; gap: 9px;
   padding: 9px 11px; border-radius: var(--radius-sm);
-  color: #c9d1dc; cursor: pointer; margin-bottom: 2px;
+  color: var(--text-secondary); cursor: pointer; margin-bottom: 2px;
   transition: background .12s, color .12s;
   user-select: none;
 }
-.nav__item:hover { background: rgba(255, 255, 255, .07); color: #fff; }
-.nav__item.is-active { background: var(--brand); color: #fff; font-weight: 500; }
+/* 悬停与选中都走 Primer 的 ActionList 语义：浅色底 + 文字加深，
+   不用「整块实心蓝」—— 那样在浅色侧栏里过于抢眼，也压过了内容区。 */
+.nav__item:hover { background: rgba(129, 139, 152, .12); color: var(--text-primary); }
+.nav__item.is-active {
+  background: var(--brand-light); color: var(--brand); font-weight: 500;
+}
 .nav__icon { width: 15px; height: 15px; flex-shrink: 0; opacity: .9; }
 
 .sidebar__foot {
-  padding: 10px 14px; border-top: 1px solid rgba(255, 255, 255, .08);
-  font-size: 11px; color: #7d8794; flex-shrink: 0;
+  padding: 10px 14px; border-top: 1px solid var(--border);
+  font-size: 11px; color: var(--text-tertiary); flex-shrink: 0;
 }
 .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 5px; }
-.dot--on { background: #3fbf8f; }
-.dot--off { background: #d05b5b; }
+.dot--on { background: var(--success); }
+.dot--off { background: var(--danger); }
 
 .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 
@@ -154,7 +198,7 @@ a { color: var(--brand); text-decoration: none; }
 
 .input, .select, .textarea {
   width: 100%; padding: 7px 10px;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: #fff; color: var(--text-primary);
   transition: border-color .12s, box-shadow .12s;
@@ -162,7 +206,7 @@ a { color: var(--brand); text-decoration: none; }
 }
 .input:focus, .select:focus, .textarea:focus {
   border-color: var(--brand);
-  box-shadow: 0 0 0 3px rgba(24, 95, 165, .12);
+  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 .input:disabled, .input[readonly] { background: var(--bg-subtle); color: var(--text-secondary); }
 .textarea { min-height: 62px; resize: vertical; line-height: 1.55; }
@@ -179,8 +223,8 @@ a { color: var(--brand); text-decoration: none; }
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   padding: 7px 14px; border-radius: var(--radius-sm);
-  border: 1px solid var(--border-strong);
-  background: #fff; color: var(--text-primary);
+  border: 1px solid var(--border);
+  background: var(--bg-subtle); color: var(--text-primary);
   cursor: pointer; font-weight: 500; white-space: nowrap;
   transition: background .12s, border-color .12s, color .12s;
 }
@@ -191,7 +235,7 @@ a { color: var(--brand); text-decoration: none; }
 .btn--primary:hover { background: var(--brand-hover); border-color: var(--brand-hover); }
 .btn--success { background: var(--success); border-color: var(--success); color: #fff; }
 .btn--success:hover { filter: brightness(1.08); }
-.btn--danger { background: #fff; border-color: #e0b4b4; color: var(--danger); }
+.btn--danger { background: var(--bg-subtle); border-color: var(--danger-border); color: var(--danger); }
 .btn--danger:hover { background: var(--danger-light); }
 .btn--ghost { background: transparent; border-color: transparent; color: var(--text-secondary); }
 .btn--ghost:hover { background: var(--bg-hover); color: var(--text-primary); }
@@ -234,7 +278,7 @@ a { color: var(--brand); text-decoration: none; }
 }
 .table th {
   position: sticky; top: 0; z-index: 2;
-  background: #f7f8fa; color: var(--text-secondary);
+  background: var(--bg-subtle); color: var(--text-secondary);
   font-weight: 600; text-align: left; white-space: nowrap;
   max-width: 200px; overflow: hidden; text-overflow: ellipsis;
   padding: 9px 11px; border-bottom: 1px solid var(--border);
@@ -257,7 +301,7 @@ a { color: var(--brand); text-decoration: none; }
   position: sticky; left: 0; z-index: 1; background: #fff;
   box-shadow: 1px 0 0 var(--border);
 }
-.table th.col-sticky { z-index: 3; background: #f7f8fa; }
+.table th.col-sticky { z-index: 3; background: var(--bg-subtle); }
 .table tbody tr:hover .col-sticky { background: var(--bg-hover); }
 .table .num { text-align: right; font-variant-numeric: tabular-nums; }
 .table .cell-wrap { white-space: normal; max-width: 300px; line-height: 1.5; }
@@ -293,33 +337,55 @@ a { color: var(--brand); text-decoration: none; }
 }
 .toast {
   padding: 9px 18px; border-radius: var(--radius);
-  background: #26303d; color: #fff; font-size: 13px;
+  background: var(--bg-emphasis); color: #fff; font-size: 13px;
   box-shadow: var(--shadow-lg); animation: toastIn .18s ease-out;
   display: flex; align-items: center; gap: 8px; max-width: 520px;
 }
-.toast--success { background: #10614e; }
-.toast--error { background: #952929; }
-.toast--warn { background: #9a6314; }
+.toast--success { background: var(--toast-success); }
+.toast--error { background: var(--toast-danger); }
+.toast--warn { background: var(--toast-warning); }
 @keyframes toastIn { from { opacity: 0; transform: translateY(-8px); } }
 
+/* ---------------- 扫描登记 ----------------
+   2026-09-20：退回登记页的整块扫描区已移除（扫码改走全局扫码枪），
+   下面这组 .scan-hero* / .video-wrap / .scan-line 规则**当前没有页面在用**。
+   刻意保留：那块 UI 有可能要求恢复，留着比重新调样式省事。
+   若确认不再需要，整段删掉即可（含 .btn--on-dark）。 */
 /* ---------------- 扫描登记 ---------------- */
 .scan-hero {
-  background: linear-gradient(135deg, #1d3c5e 0%, #185fa5 100%);
+  /* 原为深蓝渐变；Primer 是平涂体系，且渐变会让同一屏出现两种蓝。
+     改成纯品牌蓝后，焦点反而更集中在输入框上。 */
+  background: var(--brand);
   border-radius: var(--radius-lg); padding: 22px 24px; color: #fff;
   display: flex; align-items: center; gap: 20px;
 }
 .scan-hero__input-wrap { flex: 1; position: relative; }
-.scan-hero__label { font-size: 12px; color: #bcd6ee; margin-bottom: 6px; }
+.scan-hero__label { font-size: 12px; color: rgba(255, 255, 255, .85); margin-bottom: 6px; }
 .scan-hero__input {
   width: 100%; padding: 12px 16px; font-size: 16px;
   font-family: var(--font-mono); letter-spacing: .5px;
   border: 2px solid rgba(255, 255, 255, .3); border-radius: var(--radius);
   background: rgba(255, 255, 255, .96); color: var(--text-primary); outline: none;
 }
-.scan-hero__input:focus { border-color: #7fb4e8; box-shadow: 0 0 0 4px rgba(127, 180, 232, .28); }
+.scan-hero__input:focus { border-color: #fff; box-shadow: 0 0 0 4px rgba(255, 255, 255, .38); }
 .scan-hero__state {
-  font-size: 12px; margin-top: 7px; color: #bcd6ee;
+  font-size: 12px; margin-top: 7px; color: rgba(255, 255, 255, .85);
   display: flex; align-items: center; gap: 8px; min-height: 18px;
+}
+/* 「查看历史」：挂在扫描区状态行右侧的小按钮。
+   2026-09-20 从「整单信息」上方的匹配提示框挪来（那个框独有功能只有它）。
+   按「蓝色 hero 上的次级按钮」配色：半透明白底 + 白字 + 白描边。 */
+.scan-hero__hist {
+  padding: 1px 9px; font-size: 11px; font-family: inherit;
+  border: 1px solid rgba(255, 255, 255, .45);
+  background: rgba(255, 255, 255, .14);
+  color: #fff; border-radius: var(--radius-sm);
+  cursor: pointer; flex-shrink: 0;
+  transition: background .12s, border-color .12s;
+}
+.scan-hero__hist:hover {
+  background: rgba(255, 255, 255, .26);
+  border-color: rgba(255, 255, 255, .7);
 }
 .scan-hero__actions { display: flex; flex-direction: column; gap: 8px; }
 .btn--on-dark {
@@ -333,16 +399,31 @@ a { color: var(--brand); text-decoration: none; }
   padding: 2px 9px; border-radius: 20px; font-size: 11px;
   background: rgba(255, 255, 255, .16);
 }
+/* ---------------- 自动匹配栏（退回登记页顶部） ----------------
+   2026-09-20 新增：页面唯一的扫码入口 —— 只占一行（输入框 + 「匹配」按钮 +
+   一行状态）。刻意不做大底板：之前那块蓝色扫描区就是嫌占地才删掉的。 */
+.scan-bar { margin-bottom: 16px; }
+.scan-bar__row { display: flex; gap: 8px; align-items: center; }
+.scan-bar__input { flex: 1; min-width: 0; height: 34px; }
+.scan-bar__status {
+  margin-top: 7px; font-size: 12px; line-height: 17px; min-height: 17px;
+  color: var(--text-secondary);
+}
+.scan-bar__status--ok { color: var(--success-text); }
+.scan-bar__status--warn { color: var(--warning-text); }
+
 .match-banner {
   display: flex; align-items: flex-start; gap: 12px;
   padding: 11px 14px; border-radius: var(--radius);
   margin-bottom: 14px; font-size: 12.5px; line-height: 1.6;
 }
-.match-banner--hit { background: var(--success-light); border: 1px solid #a8ddc8; color: #0a4f3d; }
-.match-banner--multi { background: var(--warning-light); border: 1px solid #eccb8c; color: #6d470c; }
-.match-banner--miss { background: #eef2f6; border: 1px solid var(--border-strong); color: var(--text-secondary); }
-.match-banner--danger { background: var(--danger-light); border: 1px solid #e5a8a8; color: #7a1f1f; }
+.match-banner--hit { background: var(--success-light); border: 1px solid var(--success-border); color: var(--success-text); }
+.match-banner--multi { background: var(--warning-light); border: 1px solid var(--warning-border); color: var(--warning-text); }
+.match-banner--miss { background: var(--bg-subtle); border: 1px solid var(--border); color: var(--text-secondary); }
+.match-banner--danger { background: var(--danger-light); border: 1px solid var(--danger-border); color: var(--danger-text); }
 .match-banner__icon { font-weight: 700; flex-shrink: 0; }
+/* 提示框右侧的按钮组（如「查不到的条码」选择条：当快递单号 / 新增一行产品） */
+.match-banner__actions { display: flex; gap: 8px; flex-shrink: 0; }
 
 /* 候选列表 */
 .cand-list { display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto; }
@@ -357,10 +438,10 @@ a { color: var(--brand); text-decoration: none; }
 .section { border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 12px; overflow: hidden; }
 .section__head {
   display: flex; align-items: center; gap: 9px;
-  padding: 10px 14px; background: #f7f8fa; cursor: pointer; user-select: none;
+  padding: 10px 14px; background: var(--bg-subtle); cursor: pointer; user-select: none;
   border-bottom: 1px solid var(--border);
 }
-.section__head:hover { background: #f0f2f5; }
+.section__head:hover { background: var(--bg-hover); }
 .section__title { font-size: 13px; font-weight: 600; }
 .section__chev { margin-left: auto; color: var(--text-tertiary); transition: transform .16s; font-size: 11px; }
 .section.is-collapsed .section__chev { transform: rotate(-90deg); }
@@ -373,7 +454,7 @@ a { color: var(--brand); text-decoration: none; }
 
 /* ---------------- 模态框 ---------------- */
 .modal-mask {
-  position: fixed; inset: 0; background: rgba(20, 26, 34, .48);
+  position: fixed; inset: 0; background: rgba(31, 35, 40, .5);
   display: grid; place-items: center; z-index: 900; padding: 24px;
   animation: fadeIn .14s;
 }
@@ -419,8 +500,8 @@ a { color: var(--brand); text-decoration: none; }
 .video-wrap { position: relative; background: #000; border-radius: var(--radius); overflow: hidden; }
 .video-wrap video { width: 100%; display: block; max-height: 380px; object-fit: cover; }
 .video-wrap .scan-line {
-  position: absolute; left: 8%; right: 8%; height: 2px; background: #4ade80;
-  box-shadow: 0 0 10px #4ade80; animation: scanMove 1.8s ease-in-out infinite;
+  position: absolute; left: 8%; right: 8%; height: 2px; background: #3fb950;
+  box-shadow: 0 0 10px #3fb950; animation: scanMove 1.8s ease-in-out infinite;
 }
 @keyframes scanMove { 0%,100% { top: 18%; } 50% { top: 82%; } }
 
@@ -458,25 +539,25 @@ a { color: var(--brand); text-decoration: none; }
    支持：关键字过滤库内已有值 / 录入新值 / 键盘选择
    ============================================================ */
 .cb { position: relative; }
-.cb__input { width: 100%; padding: 7px 26px 7px 10px; border: 1px solid var(--border-strong);
+.cb__input { width: 100%; padding: 7px 26px 7px 10px; border: 1px solid var(--border);
   border-radius: var(--radius-sm); background: #fff; outline: none;
   transition: border-color .12s, box-shadow .12s; }
-.cb__input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(24, 95, 165, .12); }
+.cb__input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--focus-ring); }
 .cb__arrow { position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
   color: var(--text-tertiary); font-size: 9px; pointer-events: none; }
 /* 下拉面板用 fixed 定位：脱离表格/内容区的滚动裁剪，
    否则在 overflow 容器内会被截断且无法滚动。位置由 JS 动态计算。 */
 .cb__panel {
   position: fixed; z-index: 900;
-  background: #fff; border: 1px solid var(--border-strong);
+  background: #fff; border: 1px solid var(--border);
   border-radius: var(--radius-sm); box-shadow: var(--shadow-lg);
   max-height: 280px; overflow-y: auto;
   overscroll-behavior: contain;
 }
 .cb__panel::-webkit-scrollbar { width: 9px; }
-.cb__panel::-webkit-scrollbar-track { background: #f4f6f8; border-radius: 5px; }
-.cb__panel::-webkit-scrollbar-thumb { background: #c3ccd6; border-radius: 5px; }
-.cb__panel::-webkit-scrollbar-thumb:hover { background: #a8b3c0; }
+.cb__panel::-webkit-scrollbar-track { background: var(--bg-subtle); border-radius: 5px; }
+.cb__panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
+.cb__panel::-webkit-scrollbar-thumb:hover { background: var(--text-tertiary); }
 .cb__item { display: flex; align-items: center; gap: 8px; padding: 6px 10px;
   cursor: pointer; font-size: 12.5px; }
 .cb__item:hover, .cb__item.is-active { background: var(--brand-light); }
@@ -501,7 +582,7 @@ a { color: var(--brand); text-decoration: none; }
 .line-table { border-collapse: separate; border-spacing: 0; font-size: 12px; min-width: 100%; }
 .line-table th {
   position: sticky; top: 0; z-index: 2;
-  background: #f7f8fa; color: var(--text-secondary); font-weight: 600;
+  background: var(--bg-subtle); color: var(--text-secondary); font-weight: 600;
   padding: 7px 8px; border-bottom: 1px solid var(--border);
   border-right: 1px solid var(--border); white-space: nowrap; text-align: left;
 }
@@ -511,7 +592,7 @@ a { color: var(--brand); text-decoration: none; }
   border-right: 1px solid var(--border); vertical-align: middle;
 }
 .line-table td:last-child { border-right: none; }
-.line-table tbody tr:hover { background: #fbfcfd; }
+.line-table tbody tr:hover { background: var(--bg-subtle); }
 
 .cell-input {
   width: 100%; min-width: 84px; padding: 5px 7px;
@@ -522,7 +603,7 @@ a { color: var(--brand); text-decoration: none; }
 .cell-input:hover { border-color: var(--border-strong); background: #fff; }
 .cell-input:focus {
   border-color: var(--brand); background: #fff;
-  box-shadow: 0 0 0 2px rgba(24, 95, 165, .12);
+  box-shadow: 0 0 0 2px var(--focus-ring);
 }
 .cell-input--code { font-family: var(--font-mono); letter-spacing: .3px; }
 .cell-input--num { text-align: center; }
@@ -531,13 +612,13 @@ a { color: var(--brand); text-decoration: none; }
 /* 料号自动回填：短暂高亮，让人一眼看出哪些格子是系统填的 */
 .cell-input--filled {
   background: var(--success-light) !important;
-  border-color: #9ad3bd !important;
+  border-color: var(--success) !important;
   transition: background .25s, border-color .25s;
 }
 /* 料号在匹配数据库里查不到 —— 需要人工补全 */
 .cell-input--miss {
   background: var(--warning-light) !important;
-  border-color: #e6c68a !important;
+  border-color: var(--warning) !important;
 }
 .line-fill-hint { font-size: 12px; margin-left: 4px; }
 .line-fill-hint--ok { color: var(--success); }
@@ -572,18 +653,18 @@ input.input--locked:read-only {
   color: var(--text-secondary); cursor: pointer; font-size: 12px; line-height: 1;
 }
 .row-btn:hover { border-color: var(--brand); color: var(--brand); background: var(--brand-light); }
-.row-btn--danger:hover { border-color: #d9a3a3; color: var(--danger); background: var(--danger-light); }
+.row-btn--danger:hover { border-color: var(--danger-border); color: var(--danger); background: var(--danger-light); }
 .row-btn.is-open { border-color: var(--brand); color: var(--brand); background: var(--brand-light); }
 .row-actions { display: flex; gap: 4px; justify-content: center; }
 
-.line-detail > td { background: #f6f9fd; padding: 0; border-right: none; }
+.line-detail > td { background: var(--bg-subtle); padding: 0; border-right: none; }
 .line-detail__inner { padding: 14px 16px; }
 .line-detail__hint { font-size: 11.5px; color: var(--text-secondary); margin-bottom: 10px; }
 .line-detail__grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 16px; }
 
 .paste-hint {
   font-size: 11.5px; color: var(--text-secondary);
-  background: var(--brand-light); border: 1px dashed #9cc3e6;
+  background: var(--brand-light); border: 1px dashed rgba(9, 105, 218, .4);
   border-radius: var(--radius-sm); padding: 8px 12px; margin-bottom: 10px;
 }
 .line-toolbar { display: flex; align-items: center; gap: 8px; padding: 10px 14px;
@@ -807,7 +888,7 @@ input.input--locked:read-only {
   display: flex; align-items: center; gap: 14px;
   font-size: 12.5px; color: rgba(255, 255, 255, .82);
 }
-.photo-lightbox__link { color: #9ec8f0; text-decoration: underline; }
+.photo-lightbox__link { color: #54aeff; text-decoration: underline; }
 .photo-lightbox__link:hover { color: #fff; }
 
 /* ---------------- 列设置面板 ---------------- */
@@ -957,8 +1038,8 @@ input.input--locked:read-only {
   justify-content: center;
   padding: 24px;
   background:
-    radial-gradient(1100px 520px at 12% -10%, #e6f1fb 0%, transparent 62%),
-    radial-gradient(900px 460px at 100% 108%, #eeedfe 0%, transparent 58%),
+    radial-gradient(1100px 520px at 12% -10%, #ddf4ff 0%, transparent 62%),
+    radial-gradient(900px 460px at 100% 108%, #fbefff 0%, transparent 58%),
     var(--bg-page);
 }
 .login-wrap { width: 100%; max-width: 380px; }
@@ -966,17 +1047,19 @@ input.input--locked:read-only {
   display: flex; align-items: center; gap: 11px; margin-bottom: 18px;
   justify-content: center;
 }
+/* 登录页主图标：同上，商标图形本体，不加底、不加投影 ——
+   原来那圈蓝色阴影是配白字「返」的，套在彩色图形外面会显脏。 */
 .login-brand__logo {
-  width: 38px; height: 38px; flex: none; border-radius: 10px;
-  background: var(--brand); color: #fff;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 19px; font-weight: 700;
-  box-shadow: 0 4px 12px rgba(24, 95, 165, .28);
+  width: 38px; height: 38px; flex: none;
+  display: block;
+  object-fit: contain;
 }
 .login-brand__title { font-size: 15px; font-weight: 600; letter-spacing: .3px; }
+/* 原为全大写（letter-spacing .6px）—— 全称 48 字符大写后在本页宽度里会折行，
+   且给定的标题本就是首字母大写形式，故照原样显示、只留少量字距。 */
 .login-brand__sub {
   font-size: 10.5px; color: var(--text-tertiary);
-  letter-spacing: .6px; text-transform: uppercase;
+  letter-spacing: .3px; line-height: 1.3;
 }
 .login-card__box { box-shadow: var(--shadow-lg); }
 .login-form .field:last-of-type { margin-bottom: 16px; }
@@ -986,8 +1069,8 @@ input.input--locked:read-only {
 }
 .form-error {
   padding: 8px 11px; margin-bottom: 12px; font-size: 12.5px;
-  color: #7a1f1f; background: var(--danger-light);
-  border: 1px solid #e5a8a8; border-radius: var(--radius-sm);
+  color: var(--danger-text); background: var(--danger-light);
+  border: 1px solid var(--danger-border); border-radius: var(--radius-sm);
 }
 .form-error.hidden { display: none; }
 .link { color: var(--brand); text-decoration: none; }
@@ -1073,8 +1156,8 @@ input.input--locked:read-only {
 /* ---------------- 空态 / 危险提示条 ---------------- */
 .hint-danger {
   padding: 9px 11px; font-size: 12.5px; line-height: 1.7;
-  color: #7a1f1f; background: var(--danger-light);
-  border: 1px solid #e5a8a8; border-radius: var(--radius-sm);
+  color: var(--danger-text); background: var(--danger-light);
+  border: 1px solid var(--danger-border); border-radius: var(--radius-sm);
 }
 .hint-info {
   padding: 9px 11px; font-size: 12.5px; line-height: 1.7;

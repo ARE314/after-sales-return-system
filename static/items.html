@@ -4,10 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>匹配数据库 · 售后返件登记系统</title>
-<link rel="stylesheet" href="/static/assets/app.css??v=20260920e">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260920p">
+  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260920p">
+<link rel="stylesheet" href="/static/assets/app.css?v=20260920p">
 </head>
 <body>
-<script src="/static/assets/common.js??v=20260920e"></script>
+<script src="/static/assets/common.js?v=20260920p"></script>
 <script>
 (async () => {
   const content = await mountLayout('items', '匹配数据库',
@@ -164,7 +167,7 @@
     const thead = h('thead', {}, h('tr', {}, [
       ...COLS.map(c => {
         const arrow = state.sort_by === c
-          ? h('span', { class: 'small', style: { marginLeft: '4px', color: '#185fa5' } },
+          ? h('span', { class: 'small', style: { marginLeft: '4px', color: '#0969da' } },
               state.sort_dir === 'asc' ? '▲' : '▼') : null;
         return h('th', {
           style: { cursor: 'pointer', userSelect: 'none' },
@@ -297,7 +300,7 @@
   function openImport() {
     const fileInput = h('input', {
       type: 'file', accept: '.xlsx,.xlsm',
-      style: { width: '100%', padding: '8px', border: '1px solid #d0d5db', borderRadius: '6px' },
+      style: { width: '100%', padding: '8px', border: '1px solid #d1d9e0', borderRadius: '6px' },
     });
     const modeSel = h('select', { class: 'select' }, [
       h('option', { value: 'upsert' }, '按料号覆盖更新（推荐，保留其他记录）'),
@@ -343,7 +346,7 @@
                 ]),
                 h('table', { class: 'table table--compact' }, h('tbody', {},
                   rows.map(([k, v]) => h('tr', {}, [
-                    h('td', { style: { width: '120px', color: '#5b6472' } }, k),
+                    h('td', { style: { width: '120px', color: '#59636e' } }, k),
                     h('td', {}, String(v ?? '')),
                   ])))),
               );

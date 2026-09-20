@@ -4,10 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>工作台 · 售后返件登记系统</title>
-<link rel="stylesheet" href="/static/assets/app.css??v=20260920e">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260920p">
+  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260920p">
+<link rel="stylesheet" href="/static/assets/app.css?v=20260920p">
 </head>
 <body>
-<script src="/static/assets/common.js??v=20260920e"></script>
+<script src="/static/assets/common.js?v=20260920p"></script>
 <script>
 (async () => {
   const content = await mountLayout('index', '工作台', '售后返件登记系统 · 总览与快捷入口', [
@@ -84,7 +87,7 @@
       h('div', { class: 'card__head' }, h('div', { class: 'card__title' }, '系统信息')),
       h('div', { class: 'card__body' }, h('table', { class: 'table table--compact' },
         h('tbody', {}, infoRows.map(([k, v]) => h('tr', {}, [
-          h('td', { style: { width: '110px', color: '#5b6472' } }, k),
+          h('td', { style: { width: '110px', color: '#59636e' } }, k),
           h('td', { class: 'mono cell-wrap', style: { whiteSpace: 'normal' } }, v),
         ]))))),
     ]);
@@ -124,11 +127,11 @@
     return h('a', {
       href,
       style: {
-        display: 'block', padding: '10px 12px', border: '1px solid #e3e6ea',
-        borderRadius: '8px', background: '#fafbfc',
+        display: 'block', padding: '10px 12px', border: '1px solid #d1d9e0',
+        borderRadius: '8px', background: '#f6f8fa',
       },
-      onmouseenter: e => { e.currentTarget.style.borderColor = '#185fa5'; e.currentTarget.style.background = '#e6f1fb'; },
-      onmouseleave: e => { e.currentTarget.style.borderColor = '#e3e6ea'; e.currentTarget.style.background = '#fafbfc'; },
+      onmouseenter: e => { e.currentTarget.style.borderColor = '#0969da'; e.currentTarget.style.background = '#ddf4ff'; },
+      onmouseleave: e => { e.currentTarget.style.borderColor = '#d1d9e0'; e.currentTarget.style.background = '#f6f8fa'; },
     }, [
       h('div', { style: { fontWeight: '600', fontSize: '13px', color: '#1f2328' } }, title),
       h('div', { class: 'small muted' }, desc),

@@ -4,11 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>退回登记 · 售后返件登记系统</title>
-<link rel="stylesheet" href="/static/assets/app.css??v=20260920e">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260920p">
+  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260920p">
+<link rel="stylesheet" href="/static/assets/app.css?v=20260920p">
 </head>
 <body>
-<script src="/static/assets/lib/zxing.min.js??v=20260920e" onerror="window.__zxing_failed=1"></script>
-<script src="/static/assets/common.js??v=20260920e"></script>
+<script src="/static/assets/common.js?v=20260920p"></script>
 <script>
 (async () => {
   const modeTag = h('span', { class: 'tag tag--brand' }, '待扫描');
@@ -44,7 +46,6 @@
   let rows = [];              // 明细行
   let rowSeq = 0;             // 行内部 id
   let lastCode = '';
-  let camReader = null;
 
   /* ================= 控件工厂 ================= */
   function wrapControl(el) {
@@ -59,7 +60,8 @@
      与检测登记的模糊匹配同一套交互：输入关键字 → 弹候选 → 选中。
      候选来源由 fetchCandidates（common.js）按字段的 source 决定 ——
      料号来自**匹配数据库**（输入片段即模糊匹配，选中后照旧自动回填），
-     产品编号 / 生产年月来自**历史登记过的值**。 */
+     生产年份 / 生产月份来自**历史登记过的值**（手工修正时不用手敲）。
+     产品编号是**纯输入框**（2026-09-20 起）：序列号一次性，不做候选。 */
 
   function buildControl(f, opts = {}) {
     const { rowObj = null, compact = false } = opts;
@@ -165,8 +167,14 @@
     // 行标记：事件委托靠 data-row 从格反查所属明细行（见 rowFromCell）
     if (rowObj) el.dataset.row = String(rowObj._id);
     el.value = (rowObj ? rowObj[f.name] : header[f.name]) ?? '';
-    if (f.default === 'today') el.value = today();
-    else if (f.default !== undefined) el.value = f.default;
+    /* 默认值只在**空值**时顶上 —— 有值就用原值，不覆盖。
+       2026-09-20 修正：这里原本是无条件 el.value = f.default，于是每一次
+       renderTable()（新增行 / 删除行 / 回车换行 / Excel 粘贴）都会把用户填过的
+       「退回数量」在界面上打回 1，而 rows 对象里仍是原值；提交按对象走
+       （collectItems），就成了「界面显示 1、实际提交 3」。
+       检测登记 / 处理登记两页一直是这个写法，这里与之对齐。 */
+    if (!el.value && f.default === 'today') el.value = today();
+    else if (!el.value && f.default !== undefined) el.value = f.default;
     if (f.readonly && !rowObj) {
       el.readOnly = true;
       el.title = '固定为当天日期，不可修改';
@@ -183,31 +191,35 @@
   }
 
   /* ================= 布局骨架 ================= */
-  const scanInput = h('input', {
-    class: 'scan-hero__input', autocomplete: 'off',
-    placeholder: '扫描：快递单号 / 产品编号 / 料号 / 售后单号',
-  });
-  const stateLine = h('div', { class: 'scan-hero__state' }, [h('span', {}, '等待输入…')]);
-  const camBtn = h('button', { class: 'btn btn--on-dark btn--sm', onclick: toggleCamera }, '摄像头扫码');
-  const video = h('video', { playsinline: true, muted: true });
-  const camPanel = h('div', { class: 'video-wrap mb16 hidden' }, [video, h('div', { class: 'scan-line' })]);
+  /* 2026-09-20：这里原先是一整块蓝色扫描区（扫描输入框 + 「立即匹配 / 摄像头扫码 /
+   ＋空白行」三个按钮 + 状态行 + 摄像头预览），已按要求**整体移除**。
+   扫码没有因此失效 —— 走的是文件末尾的「全局扫码枪」attachScanner()：
+   物理扫码枪在页面任意位置输入即可触发匹配，不需要这块 UI。
+   匹配结果由下方的 #match-banner 提示框呈现（本轮一并恢复）。 */
+  const bannerHost = h('div', { id: 'match-banner' });
 
-  const hero = h('div', { class: 'scan-hero mb16' }, [
-    h('div', { class: 'scan-hero__input-wrap' }, [
-      h('div', { class: 'scan-hero__label' }, '扫描 / 输入条码　·　产品码自动新增一行'),
-      scanInput, stateLine,
-    ]),
-    h('div', { class: 'scan-hero__actions' }, [
+  /* 自动匹配栏（页面顶部唯一的扫码入口，2026-09-20 新增）。
+     只做两件事（用户约定）：
+       ① 带「|」的合并码 → 拆成一行产品的「料号 / 产品编号」两格；
+       ② 其余条码 → 交给通用匹配 handleCode（快递单号回填整单信息，
+          料号 / 产品编号 / 售后单号照旧新增一行并回填）。
+     刻意做轻：只有一行输入 + 一行状态，不再像已删除的蓝色扫描区那样占大块版面。 */
+  const scanBarInput = h('input', {
+    class: 'input input--mono scan-bar__input', type: 'text', autocomplete: 'off',
+    placeholder: '扫快递单号回填整单信息；扫「料号|产品编号」拆分成一行（例：10006-0021|231006937）',
+  });
+  const scanBarStatus = h('div', { class: 'scan-bar__status' }, '等待扫描…');
+  const scanBar = h('section', { class: 'card scan-bar' }, [
+    h('div', { class: 'scan-bar__row' }, [
+      scanBarInput,
       h('button', {
-        class: 'btn btn--on-dark btn--sm',
-        onclick: () => { lastCode = ''; handleCode(scanInput.value.trim()); },
-      }, '立即匹配'),
-      camBtn,
-      h('button', { class: 'btn btn--on-dark btn--sm', onclick: () => addRow() }, '＋ 空白行'),
+        class: 'btn btn--sm btn--primary', type: 'button',
+        onclick: () => submitScanBar(scanBarInput.value),
+      }, '匹配'),
     ]),
+    scanBarStatus,
   ]);
 
-  const bannerHost = h('div', { id: 'match-banner' });
   const headerHost = h('div', { id: 'header-host' });
   const checkBannerHost = h('div', { id: 'check-banner' });
   const tableHost = h('div', { class: 'line-scroll', id: 'line-host' });
@@ -227,7 +239,7 @@
       },
     }, '清空明细'),
     h('span', { class: 'small muted' },
-      '可从 Excel 复制多行直接粘贴；在「料号」栏回车即自动带出型号 / 类别 / 品名 / 规格'),
+      '可从 Excel 复制多行直接粘贴；在「料号」栏回车即自动带出型号 / 类别 / 品名 / 规格；末行任意格回车自动新增一行'),
     fillHint,
     lineStats,
   ]);
@@ -247,7 +259,7 @@
     tableHost,
   ]);
 
-  content.replaceChildren(hero, camPanel, bannerHost, headerHost,
+  content.replaceChildren(scanBar, bannerHost, headerHost,
     checkBannerHost, tableCard, submitBar);
 
   /* ================= 整单信息表单 ================= */
@@ -293,11 +305,11 @@
     }
     scheduleCheck();
     syncCarrier();
-    if (!headerCtl.return_no) {
-      scanInput.focus();
-    } else if (headerCtl.return_no.focus) {
-      headerCtl.return_no.focus();
-    }
+    // 2026-09-20：这里原本会在「退回单号」上聚焦（原来的分支是
+    // 「没有退回单号字段就聚焦扫描框，否则聚焦退回单号」）。
+    // 扫描区移除后必须**撤掉这个聚焦** —— attachScanner 的设计是
+    // 「焦点在输入框内就不接管」，焦点留在字段里会让扫码枪彻底失效。
+    // 焦点保持在 body，扫码枪持续可用；用户点进某个字段打字是正常行为。
   }
 
   /* ---------------- 快递公司：按单号前缀自动识别 ---------------- */
@@ -483,7 +495,14 @@
 
   function focusCell(id, field) {
     const el = tableHost.querySelector(`[data-row="${id}"][data-field="${field}"]`);
-    if (el) { el.focus(); el.select && el.select(); }
+    if (!el) return;
+    // 程序化把光标放到格子里时**不要弹候选面板**（2026-09-20）——
+    // 否则「末行回车新增一行」后新行的下拉会立刻弹开，很吵。
+    // 用户自己点格子 / 手动输入时照旧弹（click 分支未受限）。
+    const cb = el.closest && el.closest('.cb');
+    if (cb && cb.suppressOpenOnce) cb.suppressOpenOnce();
+    el.focus();
+    el.select && el.select();
   }
 
   const COL_LABELS = META.field_labels || {};
@@ -862,46 +881,114 @@
     fillPeriod(r);
   });
 
+  /* ================= 回车 = 换行（2026-09-20 新增）=================
+     明细表按表格软件的习惯补上回车换行：
+       · 最后一行的任意格回车 → 新增一行，焦点落在新行的**同一格**（接着录）；
+       · 中间行回车 → 焦点顺移到下一行的同一格（逐行核对不用鼠标）。
+     料号 / 产品编号格的回车仍先完成回填 / 解析（上面的监听器先注册、先执行），
+     本监听器只管「换行」，两者互不干扰 —— 回填是异步的，但它写入时是按
+     data-row 现查单元格（见 cellEl），所以期间重绘表格也不会丢结果。
+
+     ⚠️ 用键盘在候选面板里回车**选中候选**的那次不算换行：common.js 在事件上
+     标了 cbPicked（那次回车是在选候选）。选中后再按一次回车才会开新行。
+     注意本监听器要放在最后注册：同元素上的监听器按注册顺序执行，
+     换行必须排在回填触发器之后。 */
+  tableHost.addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    const el = e.target;
+    if (!el.dataset || !el.dataset.field || !el.dataset.row) return;
+    if (e.cbPicked) return;
+    const r = rowFromCell(el);
+    if (!r) return;
+    const idx = rows.indexOf(r);
+    if (idx < 0) return;
+    const field = el.dataset.field;
+
+    e.preventDefault();
+    if (idx === rows.length - 1) {
+      addRow({}, { focusField: field });    // 最后一行 → 新增一行，停在同一格
+    } else {
+      focusCell(rows[idx + 1]._id, field);  // 中间行 → 焦点下移一行
+    }
+  });
+
   /* ================= 扫码匹配 ================= */
-  function setState(text, loading) {
-    stateLine.replaceChildren(
-      loading ? h('span', { class: 'spin' }) : null,
-      h('span', {}, text),
-    );
-  }
   function setMode(text, cls) {
     modeTag.className = 'tag ' + (cls || '');
     modeTag.textContent = text;
   }
 
-  let matchTimer = null;
-  scanInput.addEventListener('input', () => {
-    clearTimeout(matchTimer);
-    const v = scanInput.value.trim();
-    if (!v) { bannerHost.replaceChildren(); setState('等待输入…'); return; }
-    if (v.length < 4) { setState(`已输入 ${v.length} 位，继续…`); return; }
-    setState('匹配中…', true);
-    matchTimer = setTimeout(() => handleCode(v), 240);
+  /* ================= 自动匹配栏 =================
+     统一入口：输入框回车、右侧「匹配」按钮、以及全局扫码枪（焦点不在输入框
+     时）都走 submitScanBar —— 这样「扫了什么、结果如何」永远只有一处文案。 */
+
+  /** 状态行：kind = '' | 'ok' | 'warn' */
+  function setScanBarStatus(text, kind) {
+    scanBarStatus.className = 'scan-bar__status'
+      + (kind ? ' scan-bar__status--' + kind : '');
+    scanBarStatus.textContent = text;
+  }
+
+  scanBarInput.addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    submitScanBar(scanBarInput.value);
   });
-  scanInput.addEventListener('keydown', e => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      clearTimeout(matchTimer);
-      const v = scanInput.value.trim();
-      if (v) { lastCode = ''; handleCode(v); }
+
+  async function submitScanBar(raw) {
+    const text = String(raw || '').trim();
+    if (!text) return;
+    // 先清空、并把焦点留在栏里：连着扫不用碰鼠标
+    scanBarInput.value = '';
+    scanBarInput.focus();
+
+    if (text.indexOf('|') >= 0) { await handleMergedCode(text); return; }
+
+    // 非合并码：通用匹配。清 lastCode 是为了「同一个码扫两次」也算两次 ——
+    // 与全局扫码枪的既有行为一致（同款产品返两件很常见）。
+    lastCode = '';
+    await handleCode(text);
+  }
+
+  /** 「料号|产品编号」合并码（例 10006-0021|231006937）→ 拆成一行产品的两格，
+      再走既有的两条自动补全：料号 → 型号/规格/品名/类别；产品编号 → 生产年月。 */
+  async function handleMergedCode(text) {
+    const parts = text.split('|').map(x => x.trim());
+    const materialNo = parts[0] || '';
+    const productCode = parts[1] || '';
+    const extra = parts.slice(2).filter(Boolean).length;
+
+    if (!materialNo && !productCode) {
+      setScanBarStatus(`⚠ 无法拆分：${text}`, 'warn');
+      toast('条码里没有可用的料号 / 产品编号', 'warn');
+      return;
     }
-  });
+
+    const r = addRow({ material_no: materialNo, product_code: productCode });
+    if (materialNo) await triggerMaterialFill(r);   // 未命中会标黄并给提示
+    const lineNo = rows.indexOf(r) + 1;
+
+    const seg = [];
+    if (materialNo) seg.push(`料号 ${materialNo}`);
+    if (productCode) seg.push(`产品编号 ${productCode}`);
+    const miss = !!materialNo && r._fillFound === false;
+    setScanBarStatus(
+      `✓ 已拆分 → 第 ${lineNo} 行：${seg.join('　·　')}`
+      + (miss ? '　（料号未匹配到物料主档，已标黄）' : '')
+      + (extra ? `　（已忽略多余段 ${extra} 个）` : ''),
+      miss ? 'warn' : 'ok');
+    setMode(miss ? '已拆分' : '已匹配', miss ? 'tag--warning' : 'tag--success');
+    toast(`已拆分并新增第 ${lineNo} 行`, miss ? 'warn' : 'success');
+  }
 
   async function handleCode(code) {
     if (!code) { toast('请输入或扫描条码', 'warn'); return; }
     if (code === lastCode) return;
-    setState('匹配中…', true);
 
     let res;
     try {
       res = await api('/scan/match', { method: 'POST', body: { code } });
     } catch (e) {
-      setState('匹配失败：' + e.message);
       toast('匹配失败：' + e.message, 'error');
       return;
     }
@@ -912,13 +999,37 @@
 
     // 扫到快递单号：回填整单信息，不额外加行（除非当前一行都没有）
     if (res.exact && firstField === 'return_no') {
-      if (!headerCtl.return_no.getValue()) headerCtl.return_no.setValue(code);
-      applyHeaderSuggest(res.suggest);
+      const cur = headerCtl.return_no.getValue();
+      /* 「人工优先」（2026-09-20 与用户约定）：退回单号已有**别的**值时一律不覆盖，
+         否则两个快递单会悄悄合并到同一条记录下。历史带出的风机厂家 / 风场 /
+         快递公司也只在「这次确实写入了本单号」时才补，避免串单。 */
+      if (!cur || cur === code) {
+        if (!cur) headerCtl.return_no.setValue(code);
+        applyHeaderSuggest(res.suggest);
+        setMode('已匹配', 'tag--success');
+        setScanBarStatus(`✓ 快递单号 ${code} → 已回填整单信息`, 'ok');
+        toast('命中退回单号，整单信息已回填', 'success');
+      } else {
+        setMode('单号未变', 'tag--warning');
+        setScanBarStatus(`⚠ 退回单号已是「${cur}」，本次扫到的「${code}」未覆盖`
+          + ' —— 要换单请先清空「退回单号」栏', 'warn');
+        toast(`退回单号已是「${cur}」，未覆盖`, 'warn', 4600);
+      }
       syncCarrier();
-      if (!rows.length) addRow({}, { focusField: 'product_code' });
-      setState(`✓ 命中退回单号，已回填整单信息（${res.matches[0].count} 条历史）`);
-      setMode('已匹配', 'tag--success');
-      toast('命中退回单号，整单信息已回填', 'success');
+      // 2026-09-20：**不再**顺手塞一个空行、也不再顺手把光标挪进表格 ——
+      // 扫完单号接着要扫产品，光标留在匹配栏才顺手；而且「料号|产品编号」这种
+      // 合并码只有在匹配栏里才能被拆分，光标在明细格子里会把它扫成乱码。
+      return;
+    }
+
+    /* 历史里完全查不到 —— **不猜**，让用户当场选（2026-09-20 用户选定）。
+       猜错任何一边都会让数据跑错地方：快递单号进了产品编号，或产品编号进了
+       退回单号。两个入口（输入框回车、全局扫码枪）都走这里。 */
+    if (!res.matches.length && !res.suggest) {
+      renderAmbiguousBanner(code);
+      setMode('待选择', 'tag--warning');
+      setScanBarStatus('⚠ 历史库没有这个条码 —— 请在下方提示框里选'
+        + '「当快递单号」或「新增一行产品」', 'warn');
       return;
     }
 
@@ -934,20 +1045,83 @@
     }
     addRow(init);
 
+    const lineNo = rows.length;
     if (res.exact) {
-      setState(`✓ 命中「${res.matches[0].field_label}」，已新增一行并回填`);
       setMode('已匹配', 'tag--success');
       toast(`匹配成功：${res.matches[0].field_label}，已新增一行`, 'success');
+      setScanBarStatus(
+        `✓ 命中「${res.matches[0].field_label}」→ 已新增第 ${lineNo} 行并回填`, 'ok');
     } else if (res.fuzzy) {
-      setState(`≈ 未精确匹配，按相似记录新增一行（${res.matches[0].count} 条）`);
       setMode('模糊匹配', 'tag--warning');
-    } else if (res.suggest && res.suggest._source === 'model_dict') {
-      setState('○ 历史无记录，已按型号字典新增一行');
-      setMode('字典命中', 'tag--info');
+      setScanBarStatus(`≈ 近似命中 → 已新增第 ${lineNo} 行，请核对`, 'warn');
     } else {
-      setState('○ 无历史记录，已新增空白行，请手工补全');
-      setMode('新件', '');
+      // 没有精确 / 模糊命中，但有兜底来源：型号字典 或 匹配数据库
+      // （此前只认 model_dict，item_master 会被误报成「历史无此条码 → 新件」）
+      const fromDb = res.suggest && res.suggest._source === 'item_master';
+      setMode('已回填', 'tag--info');
+      setScanBarStatus(`✓ 按${fromDb ? '匹配数据库' : '型号字典'}回填 → 已新增第 ${lineNo} 行`, 'ok');
     }
+  }
+
+  /* 历史里查不到条码时的**选择条**：不猜它是什么，给两个按钮让用户当场定。
+     —— 快递单号 / 产品编号 都可能长得像纯数字，机器猜错就会把数据归错地方，
+        所以这里把判断交回给人，只做一次点击。 */
+  function renderAmbiguousBanner(code) {
+    bannerHost.replaceChildren(h('div', { class: 'match-banner match-banner--multi mb16' }, [
+      h('span', { class: 'match-banner__icon' }, '?'),
+      h('div', { style: { flex: '1' } }, [
+        h('div', {}, ['历史库中查不到', h('span', { class: 'mono', style: { marginLeft: '6px' } }, code)]),
+        h('div', { class: 'small', style: { marginTop: '3px' } },
+          '它是快递单号，还是产品？选一个 —— 猜错会让数据归错地方。'),
+      ]),
+      h('div', { class: 'match-banner__actions' }, [
+        h('button', {
+          class: 'btn btn--sm btn--primary', type: 'button',
+          onclick: () => useAsWaybill(code),
+        }, '当快递单号'),
+        h('button', {
+          class: 'btn btn--sm', type: 'button',
+          onclick: () => useAsProduct(code),
+        }, '当产品'),
+        /* 按钮文案刻意避开「新增一行」四个字 —— 那是明细工具条按钮的文案，
+           重名会让按文案找按钮的地方（测试、脚本）抓错元素。 */
+      ]),
+    ]));
+  }
+
+  /** 把查不到的条码当快递单号：写进「退回单号」并按前缀识别快递公司。
+      「人工优先」：退回单号已有别的值时只提示、不覆盖。 */
+  function useAsWaybill(code) {
+    const cur = headerCtl.return_no.getValue();
+    if (!cur || cur === code) {
+      if (!cur) headerCtl.return_no.setValue(code);
+      syncCarrier();
+      setMode('已匹配', 'tag--success');
+      setScanBarStatus(`✓ 已作为快递单号填入「退回单号」：${code}`, 'ok');
+      toast('已填入「退回单号」', 'success');
+    } else {
+      setMode('单号未变', 'tag--warning');
+      setScanBarStatus(`⚠ 退回单号已是「${cur}」，本次的「${code}」未覆盖`
+        + ' —— 要换单请先清空该栏', 'warn');
+      toast(`退回单号已是「${cur}」，未覆盖`, 'warn', 4600);
+    }
+    bannerHost.replaceChildren();
+    scanBarInput.focus();          // 继续扫下一个
+  }
+
+  /** 把查不到的条码当产品：新增一行，条码落进「产品编号」。 */
+  function useAsProduct(code, init = {}) {
+    const merged = Object.assign({}, init);
+    if (!merged.product_code && !merged.material_no && !merged.product_model) {
+      merged.product_code = code;
+    }
+    const r = addRow(merged);
+    const lineNo = rows.indexOf(r) + 1;
+    setMode('已新增', 'tag--info');
+    setScanBarStatus(`✓ 已作为产品新增第 ${lineNo} 行（产品编号 ${code}），请补全其它列`, 'ok');
+    toast(`已新增第 ${lineNo} 行`, 'success');
+    bannerHost.replaceChildren();
+    scanBarInput.focus();          // 继续扫下一个
   }
 
   function applyHeaderSuggest(suggest) {
@@ -960,6 +1134,10 @@
     });
   }
 
+  /* 扫码 / 扫码枪命中后，在「整单信息」上方这条提示框里给出结果。
+     2026-09-20 恢复：上一轮曾误删（当时以为要删的是它，实际是蓝色扫描区）。
+     它是扫码流程唯一的**持久**反馈 —— toast 一闪而过，模式标签只说明状态，
+     这里才写清「命中了什么字段、多少条历史、能否查看历史」。 */
   function renderBanner(res) {
     bannerHost.replaceChildren();
     if (!res.matches.length) {
@@ -1029,44 +1207,6 @@
         h('div', { class: 'cand-list' }, list),
       ]),
     });
-  }
-
-  /* ================= 摄像头 ================= */
-  async function toggleCamera() {
-    if (camReader) { stopCamera(); return; }
-    if (window.__zxing_failed || typeof ZXing === 'undefined') {
-      toast('扫码组件未加载，请刷新页面或改用扫码枪', 'warn');
-      return;
-    }
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      toast('当前环境不支持摄像头（需通过 127.0.0.1 或 HTTPS 访问）', 'warn');
-      return;
-    }
-    try {
-      camPanel.classList.remove('hidden');
-      camBtn.textContent = '停止摄像头';
-      camBtn.classList.add('is-active');
-      camReader = new ZXing.BrowserMultiFormatReader();
-      camReader.decodeFromVideoDevice(null, video, result => {
-        if (result) {
-          const text = result.getText();
-          stopCamera();
-          lastCode = '';
-          handleCode(text);
-          toast('摄像头识别成功：' + text, 'success');
-        }
-      });
-    } catch (e) {
-      toast('无法启用摄像头：' + e.message, 'error');
-      stopCamera();
-    }
-  }
-  function stopCamera() {
-    try { if (camReader) camReader.reset(); } catch { /* ignore */ }
-    camReader = null;
-    camPanel.classList.add('hidden');
-    camBtn.textContent = '摄像头扫码';
-    camBtn.classList.remove('is-active');
   }
 
   /* ================= 提交 ================= */
@@ -1150,19 +1290,19 @@
           ]),
           h('table', { class: 'table table--compact' }, h('tbody', {}, [
             h('tr', {}, [
-              h('td', { style: { width: '110px', color: '#5b6472' } }, '售后单号'),
+              h('td', { style: { width: '110px', color: '#59636e' } }, '售后单号'),
               h('td', { class: 'mono' }, res.order_no + (res.is_new_order ? '（新建）' : '（续接）')),
             ]),
             h('tr', {}, [
-              h('td', { style: { color: '#5b6472' } }, '明细唯一键'),
+              h('td', { style: { color: '#59636e' } }, '明细唯一键'),
               h('td', { class: 'mono' }, res.detail_keys.join('、')),
             ]),
             h('tr', {}, [
-              h('td', { style: { color: '#5b6472' } }, '退回单号'),
+              h('td', { style: { color: '#59636e' } }, '退回单号'),
               h('td', { class: 'mono' }, headerData.return_no || '—'),
             ]),
             h('tr', {}, [
-              h('td', { style: { color: '#5b6472' } }, '登记时间'),
+              h('td', { style: { color: '#59636e' } }, '登记时间'),
               h('td', {}, res.registered_at),
             ]),
           ])),
@@ -1193,31 +1333,26 @@
     });
     rows = [];
     renderTable();
-    bannerHost.replaceChildren();
-    scanInput.value = '';
     lastCode = '';
     autoCarrier = '';
-    setState('等待输入…');
     setMode('待扫描', 'tag--brand');
     scheduleCheck();
     syncCarrier();
+    setScanBarStatus('等待扫描…', '');
     if (focus) {
-      if (headerCtl.return_no && headerCtl.return_no.focus) headerCtl.return_no.focus();
-      toast('已清空，可开始新的快递单', 'info');
+      // 2026-09-20：清空后把光标交给顶部的自动匹配栏（不再是「退回单号」）——
+      // 新单的第一个动作要么扫快递单号、要么扫 料号|产品编号，两者都由它分流。
+      scanBarInput.focus();
+      toast('已清空，可开始扫描新的快递单', 'info');
     }
   }
 
   /* ================= 全局扫码枪 ================= */
+  // 全局扫码枪（焦点不在输入框时）也走匹配栏同一个入口 —— 这样带「|」的
+  // 合并码不论焦点在哪都能正确拆分成一行。反馈统一写在匹配栏状态行。
   attachScanner(code => {
-    scanInput.value = code;
     lastCode = '';
-    handleCode(code);
-  });
-  document.addEventListener('click', e => {
-    const tag = (e.target.tagName || '').toUpperCase();
-    if (['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'A'].includes(tag)) return;
-    if (e.target.closest && e.target.closest('.cb')) return;
-    scanInput.focus();
+    submitScanBar(code);
   });
 
   /* ================= 启动 ================= */
@@ -1225,8 +1360,13 @@
   // 而这些函数依赖本文件中后置声明的变量（如 checkTimer）。提前调用会触发
   // TDZ 错误并中断整个 IIFE，导致后续所有 const/let 失效、明细表格无法渲染。
   renderHeader();
-  scanInput.focus();
-  setState('等待输入…');
+  // 扫描区已移除，扫码改由全局扫码枪（attachScanner）接管，而它在
+  // 「焦点位于输入框内」时会主动避让（避免干扰正常打字）。所以这里要确保
+  // 启动后焦点**不在**任何输入框里 —— 否则第一个扫码就会被吞掉。
+  // （原先这里有一句 scanInput.focus()，那个输入框已被移除。）
+  if (document.activeElement && document.activeElement.blur) {
+    document.activeElement.blur();
+  }
   updateStats();
 })();
 </script>

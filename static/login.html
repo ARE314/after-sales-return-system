@@ -4,10 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>登录 · 售后返件登记系统</title>
-<link rel="stylesheet" href="/static/assets/app.css??v=20260920e">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260920p">
+  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260920p">
+<link rel="stylesheet" href="/static/assets/app.css?v=20260920p">
 </head>
 <body class="login-body">
-<script src="/static/assets/common.js??v=20260920e"></script>
+<script src="/static/assets/common.js?v=20260920p"></script>
 <script>
 /* 登录页是唯一不进主布局的页面：它需要在未登录状态下就能打开，
    所以不调 mountLayout（那会去拉身份、渲染侧栏，形成循环）。
@@ -43,10 +46,11 @@
 
   function brand() {
     return h('div', { class: 'login-brand' }, [
-      h('div', { class: 'login-brand__logo' }, '返'),
+      h('img', { class: 'login-brand__logo', src: '/static/assets/logo.png?v=20260920p',
+                 alt: '贝良', width: 38, height: 38 }),
       h('div', {}, [
         h('div', { class: 'login-brand__title' }, '售后返件登记系统'),
-        h('div', { class: 'login-brand__sub' }, 'After-sales Return System'),
+        h('div', { class: 'login-brand__sub' }, SITE_TITLE_EN),
       ]),
     ]);
   }
