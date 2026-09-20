@@ -1,0 +1,42 @@
+# 售后返件登记系统 —— 不要提交的东西
+#
+# ⚠️ 重点：**data/ 必须忽略**。它装着运行时数据：五个库（含用户密码哈希与
+# 审计日志）、照片原图、以及自动备份出来的快照。把这些提交上去等于把
+# 生产数据和凭据散播出去，而且 checkout 到别处会直接用这份旧数据启动。
+
+data/
+
+# 自检凭据（本机文件，见 README「自检」一节）
+tests/_smoke.env
+tests/_smoke_created.txt
+
+# 容器部署的本地配置（含明文密码）
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 日志与临时产物
+*.log
+*.tmp
+tool-results/
+
+# AI 工作记忆（.workbuddy/memory/*.md）
+#
+# 它记的是开发过程：踩过的坑、内部约定、审计发现清单、账号名等。
+# 对协作者有价值，但不属于项目源码，而且和 .dockerignore 一样 ——
+# 内部过程记录不该进可分发产物/公开仓库。
+# 想连它一起提交：删掉这三行即可。
+.workbuddy/

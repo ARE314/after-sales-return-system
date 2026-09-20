@@ -1,0 +1,16 @@
+# 售后返件登记系统 —— 运行依赖
+#
+# 装完即应能 `python app.py` 起来。**漏一个包的表现是启动即崩**（导入期报错），
+# 所以这里必须与代码里真实用到的第三方模块一一对应：
+#   fastapi / uvicorn  web 框架与服务
+#   openpyxl           Excel 导入导出（/api/export、/api/items/import）
+#   Pillow             照片证据：缩略图生成、EXIF 转正、格式校验
+#
+# 自检守着这条：`python tools/check_deploy.py` 会扫描全仓的第三方 import
+# 与本文件比对，少任何一个都直接报错（含 --check，可进 CI）。历史上就漏过
+# Pillow —— core/photos.py 里 `from PIL import ...` 在模块顶层，漏装会让
+# app.py 连启动都启动不了，而 README「服务器部署」的三步照做也照样起不来。
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+openpyxl>=3.1.0
+Pillow>=10.0.0

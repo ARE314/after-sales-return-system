@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>匹配数据库 · 售后返件登记系统</title>
+<link rel="stylesheet" href="/static/assets/app.css??v=20260920e">
+</head>
+<body>
+<script src="/static/assets/common.js??v=20260920e"></script>
+<script>
+(async () => {
+  const content = await mountLayout('items', '匹配数据库',
+    '物料主档 · 扫码后据料号回填品名 / 型号 / 规格', [
+    h('button', { class: 'btn btn--sm', onclick: () => loadMeta(true) }, '刷新'),
+    h('button', { class: 'btn btn--sm', onclick: doExport }, '导出 Excel'),
+    h('button', { class: 'btn btn--sm', onclick: openImport }, '导入 Excel'),
+    h('button', { class: 'btn btn--primary btn--sm', onclick: () => openEditor(null) }, '＋ 新增记录'),
+  ]);
+
+  let META_ITEMS = { labels: {}, facets: {}, stats: {} };
+  const state = {
+    keyword: '', page: 1, page_size: 50,
+    sort_by: 'material_no', sort_dir: 'asc',
+    filters: {}, total: 0, rows: [],
+  };
+
+  /* ---------------- 统计卡 ---------------- */
+  const statHost = h('div', { id: 'stat-host' });
+
+  /* ---------------- 搜索与筛选 ---------------- */
+  const kwInput = h('input', {
+    class: 'input', style: { width: '320px' },
+    placeholder: '搜索料号 / 旧料号 / 品名 / 型号 / 规格 / 描述 / 客户…',
+  });
+  let kwTimer = null;
+  kwInput.addEventListener('input', () => {
+    clearTimeout(kwTimer);
+    kwTimer = setTimeout(() => { state.keyword = kwInput.value.trim(); load(1); }, 300);
+  });
+  kwInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { clearTimeout(kwTimer); state.keyword = kwInput.value.trim(); load(1); }
+  });
+
+  const facetRow = h('div', { class: 'flex flex-wrap', style: { gap: '8px' } });
+  const FACETS = [
+    ['product_name', '品名'], ['model_no', '型号'],
+    ['production_stat', '生产统计'], ['customer', '客户'],
+  ];
+
+  function buildFacets() {
+    facetRow.replaceChildren(...FACETS.map(([field, label]) => {
+      const sel = h('select', { class: 'select select--sm', style: { width: '160px' } },
+        [h('option', { value: '' }, label + '：全部')]);
+      const opts = (META_ITEMS.facets && META_ITEMS.facets[field]) || [];
+      sel.replaceChildren(
+        h('option', { value: '' }, label + '：全部'),
+        ...opts.slice(0, 120).map(o => h('option', { value: o.value },
+          `${o.value} (${o.use_count})`)));
+      sel.addEventListener('change', () => {
+        if (sel.value) state.filters[field] = sel.value; else delete state.filters[field];
+        load(1);
+      });
+      return sel;
+    }));
+    facetRow.appendChild(h('button', {
+      class: 'btn btn--sm btn--ghost',
+      onclick: () => {
+        Object.keys(state.filters).forEach(k => delete state.filters[k]);
+        kwInput.value = ''; state.keyword = '';
+        $$('select', facetRow).forEach(s => s.value = '');
+        load(1);
+      },
+    }, '重置'));
+  }
+
+  /* ---------------- 表格 ---------------- */
+  const COLS = ['material_no', 'old_material_no', 'product_name', 'model_no',
+    'spec', 'production_stat', 'description', 'customer'];
+  const tableHost = h('div', { class: 'table-wrap', style: { maxHeight: 'calc(100vh - 420px)' } });
+  const pagerHost = h('div', { class: 'pager' });
+  const summary = h('div', { class: 'card__hint' });
+
+  content.replaceChildren(
+    statHost,
+    h('div', { class: 'card mb12 mt12' }, h('div', { class: 'card__body' }, [
+      h('div', { class: 'flex flex-wrap', style: { gap: '8px' } }, [
+        kwInput,
+        h('span', { class: 'small muted', style: { alignSelf: 'center' } },
+          '料号是唯一键，重复导入会按料号覆盖'),
+      ]),
+      h('div', { class: 'mt8' }, facetRow),
+    ])),
+    h('div', { class: 'card' }, [
+      h('div', { class: 'card__head' }, [
+        h('div', { class: 'card__title' }, '物料主档'),
+        summary,
+        h('div', { class: 'card__tools' },
+          h('button', { class: 'btn btn--sm btn--ghost', onclick: () => load(state.page) }, '刷新')),
+      ]),
+      tableHost,
+      pagerHost,
+    ]),
+  );
+
+  /* ---------------- 数据加载 ---------------- */
+  async function loadMeta(force) {
+    try {
+      META_ITEMS = await api('/items/meta');
+      if (force) toast('已刷新匹配库状态', 'success');
+    } catch (e) {
+      toast('加载匹配库元数据失败：' + e.message, 'error');
+    }
+    buildFacets();
+    renderStats();
+  }
+
+  function renderStats() {
+    const s = META_ITEMS.stats || {};
+    const items = [
+      ['记录总数', num(s.total), '条', ''],
+      ['品名种类', num(s.names), '种', 'kpi--info'],
+      ['型号种类', num(s.models), '种', 'kpi--info'],
+      ['生产统计', num(s.stats), '类', ''],
+      ['缺规格', num(s.no_spec), '条', s.no_spec ? 'kpi--warning' : ''],
+      ['缺产品类别', num(s.no_category), '条', s.no_category ? 'kpi--warning' : ''],
+    ];
+    statHost.replaceChildren(h('div', { class: 'kpis' },
+      items.map(([label, value, unit, cls]) => h('div', { class: `kpi ${cls}` }, [
+        h('div', { class: 'kpi__label' }, label),
+        h('div', { class: 'kpi__value' }, [value, h('span', { class: 'kpi__unit' }, unit)]),
+      ]))));
+  }
+
+  async function load(page = 1) {
+    state.page = page;
+    tableHost.replaceChildren(h('div', { class: 'empty' }, '加载中…'));
+    try {
+      const q = Object.assign({}, state.filters, {
+        keyword: state.keyword, page: state.page, page_size: state.page_size,
+        sort_by: state.sort_by, sort_dir: state.sort_dir,
+      });
+      const res = await api('/items?' + qs(q));
+      state.rows = res.rows; state.total = res.total;
+      renderTable(res);
+      renderPager(res);
+      summary.textContent = `共 ${num(res.total)} 条 · 第 ${res.page}/${Math.max(1, res.pages)} 页`;
+    } catch (e) {
+      tableHost.replaceChildren(h('div', { class: 'empty' }, '加载失败：' + e.message));
+    }
+  }
+
+  function renderTable(res) {
+    if (!res.rows.length) {
+      tableHost.replaceChildren(h('div', { class: 'empty' }, [
+        h('div', { class: 'empty__icon' }, '○'),
+        state.keyword || Object.keys(state.filters).length
+          ? '没有符合条件的物料'
+          : '匹配库为空，点右上角「导入 Excel」导入物料主档',
+      ]));
+      return;
+    }
+    const L = META_ITEMS.labels || {};
+    const thead = h('thead', {}, h('tr', {}, [
+      ...COLS.map(c => {
+        const arrow = state.sort_by === c
+          ? h('span', { class: 'small', style: { marginLeft: '4px', color: '#185fa5' } },
+              state.sort_dir === 'asc' ? '▲' : '▼') : null;
+        return h('th', {
+          style: { cursor: 'pointer', userSelect: 'none' },
+          onclick: () => {
+            if (state.sort_by === c) state.sort_dir = state.sort_dir === 'asc' ? 'desc' : 'asc';
+            else { state.sort_by = c; state.sort_dir = 'asc'; }
+            load(1);
+          },
+        }, [L[c] || c, arrow]);
+      }),
+      h('th', { style: { width: '92px', textAlign: 'center' } }, '操作'),
+    ]));
+
+    const tbody = h('tbody', {}, res.rows.map(r => h('tr', {}, [
+      h('td', { class: 'mono', style: { fontWeight: '500' } }, r.material_no || ''),
+      h('td', { class: 'mono muted' }, r.old_material_no || ''),
+      h('td', {}, r.product_name || ''),
+      h('td', {}, r.model_no || ''),
+      h('td', { class: 'mono' }, r.spec || ''),
+      h('td', {}, r.production_stat || ''),
+      h('td', { class: 'cell-wrap', title: r.description || '' }, r.description || ''),
+      h('td', {}, r.customer || ''),
+      h('td', {}, h('div', { class: 'row-actions' }, [
+        h('button', { class: 'row-btn', title: '编辑', onclick: () => openEditor(r) }, '✎'),
+        h('button', {
+          class: 'row-btn row-btn--danger', title: '删除',
+          onclick: async () => {
+            const ok = await confirmDialog(
+              `确定删除料号 <b class="mono">${escapeHtml(r.material_no)}</b> 吗？删除后不可恢复。`,
+              { title: '删除物料', danger: true });
+            if (!ok) return;
+            try {
+              await api('/items/' + r.id, { method: 'DELETE' });
+              toast('已删除', 'success');
+              loadMeta(); load(state.page);
+            } catch (e) { toast('删除失败：' + e.message, 'error'); }
+          },
+        }, '×'),
+      ])),
+    ])));
+
+    tableHost.replaceChildren(h('table', { class: 'table' }, [thead, tbody]));
+  }
+
+  function renderPager(res) {
+    const sizes = [20, 50, 100, 200];
+    const sizeSel = h('select', { class: 'select select--sm', style: { width: '92px' } },
+      sizes.map(s => h('option', { value: s, selected: s === state.page_size ? 'selected' : null }, `${s} 条/页`)));
+    sizeSel.addEventListener('change', () => { state.page_size = Number(sizeSel.value); load(1); });
+
+    const btn = (text, p, disabled) => h('button', {
+      class: 'btn btn--sm', disabled: disabled ? 'disabled' : null, onclick: () => load(p),
+    }, text);
+
+    pagerHost.replaceChildren(
+      h('span', {}, `共 ${num(res.total)} 条，${Math.max(1, res.pages)} 页`),
+      h('div', { class: 'pager__spacer' }),
+      sizeSel,
+      btn('首页', 1, res.page <= 1),
+      btn('上一页', res.page - 1, res.page <= 1),
+      h('span', { class: 'mono', style: { padding: '0 4px' } }, `${res.page} / ${Math.max(1, res.pages)}`),
+      btn('下一页', res.page + 1, res.page >= res.pages),
+      btn('末页', res.pages, res.page >= res.pages),
+    );
+  }
+
+  /* ---------------- 编辑弹窗 ---------------- */
+  function openEditor(row) {
+    const L = META_ITEMS.labels || {};
+    const FIELDS = [
+      ['material_no', 'text', true], ['old_material_no', 'text', false],
+      ['product_name', 'text', false], ['model_no', 'text', false],
+      ['spec', 'text', false], ['production_stat', 'text', false],
+      ['category', 'text', false], ['customer', 'text', false],
+      ['description', 'textarea', false],
+      ['param1', 'text', false], ['param2', 'text', false], ['param3', 'text', false],
+    ];
+    const inputs = {};
+
+    const grid = h('div', { class: 'grid grid--3' }, FIELDS.map(([name, type, required]) => {
+      let el;
+      if (type === 'textarea') {
+        el = h('textarea', { class: 'textarea' });
+      } else {
+        el = h('input', { class: 'input' + (name === 'material_no' ? ' input--mono' : '') });
+      }
+      el.value = (row && row[name]) != null ? (row[name] || '') : '';
+      inputs[name] = el;
+      return h('div', {
+        class: 'field',
+        style: type === 'textarea' ? { gridColumn: '1 / -1', marginBottom: '0' } : { marginBottom: '0' },
+      }, [
+        h('label', { class: 'field__label' },
+          [L[name] || name, required ? h('span', { class: 'req' }, '*') : null]),
+        el,
+      ]);
+    }));
+
+    const m = openModal({
+      title: row ? `编辑物料 ${row.material_no}` : '新增物料',
+      wide: true,
+      body: h('div', {}, [
+        h('div', { class: 'match-banner match-banner--miss mb12' }, [
+          h('span', { class: 'match-banner__icon' }, 'ⓘ'),
+          h('div', {}, '料号是唯一键。填写已存在的料号会覆盖该条记录，不会新增重复行。'),
+        ]),
+        grid,
+      ]),
+      footer: [
+        h('button', { class: 'btn', onclick: () => m.close() }, '取消'),
+        h('button', {
+          class: 'btn btn--primary',
+          onclick: async () => {
+            const data = {};
+            Object.entries(inputs).forEach(([k, el]) => { data[k] = (el.value || '').trim(); });
+            if (!data.material_no) { toast('料号不能为空', 'warn'); return; }
+            try {
+              const res = await api('/items', { method: 'POST', body: data });
+              toast(res.action === 'create' ? '已新增物料' : '已更新物料', 'success');
+              m.close();
+              loadMeta(); load(res.action === 'create' ? 1 : state.page);
+            } catch (e) { toast('保存失败：' + e.message, 'error'); }
+          },
+        }, '保存'),
+      ],
+    });
+  }
+
+  /* ---------------- 导入导出 ---------------- */
+  function openImport() {
+    const fileInput = h('input', {
+      type: 'file', accept: '.xlsx,.xlsm',
+      style: { width: '100%', padding: '8px', border: '1px solid #d0d5db', borderRadius: '6px' },
+    });
+    const modeSel = h('select', { class: 'select' }, [
+      h('option', { value: 'upsert' }, '按料号覆盖更新（推荐，保留其他记录）'),
+      h('option', { value: 'replace' }, '先清空整表再导入（整表刷新）'),
+    ]);
+    const resultBox = h('div', { class: 'mt12' });
+
+    const m = openModal({
+      title: '导入物料主档 Excel',
+      body: h('div', {}, [
+        h('div', { class: 'paste-hint mb12' },
+          '表头需包含「料号」列；可识别的列：旧料号 / 料号 / 品名 / 型号 / 规格 / 描述 / 客户 / 生产统计 / 产品量程 / 信号输出 / 防护等级 / 产品类别。料号为空的行会被跳过。'),
+        h('div', { class: 'field' }, [h('label', { class: 'field__label' }, '选择 Excel 文件'), fileInput]),
+        h('div', { class: 'field' }, [h('label', { class: 'field__label' }, '导入模式'), modeSel]),
+        resultBox,
+      ]),
+      footer: [
+        h('button', { class: 'btn', onclick: () => m.close() }, '关闭'),
+        h('button', {
+          class: 'btn btn--primary',
+          onclick: async () => {
+            const f = fileInput.files && fileInput.files[0];
+            if (!f) { toast('请先选择文件', 'warn'); return; }
+            const btn = m.modal.querySelector('.modal__foot .btn--primary');
+            btn.disabled = true; btn.textContent = '导入中…';
+            resultBox.replaceChildren();
+            try {
+              const fd = new FormData();
+              fd.append('file', f);
+              const res = await api(`/items/import?mode=${modeSel.value}`, {
+                method: 'POST', body: fd,
+              });
+              const rows = [
+                ['文件', res.file], ['工作表', res.sheet],
+                ['读取行数', res.rows], ['新增', res.inserted],
+                ['更新', res.updated], ['跳过（无料号）', res.skipped],
+                ['当前总记录', res.stats.total],
+              ];
+              resultBox.replaceChildren(
+                h('div', { class: 'match-banner match-banner--hit mb12' }, [
+                  h('span', { class: 'match-banner__icon' }, '✓'),
+                  h('div', {}, `导入完成：新增 ${res.inserted}，更新 ${res.updated}`),
+                ]),
+                h('table', { class: 'table table--compact' }, h('tbody', {},
+                  rows.map(([k, v]) => h('tr', {}, [
+                    h('td', { style: { width: '120px', color: '#5b6472' } }, k),
+                    h('td', {}, String(v ?? '')),
+                  ])))),
+              );
+              toast(`导入完成：新增 ${res.inserted}，更新 ${res.updated}`, 'success', 4000);
+              loadMeta(); load(1);
+            } catch (e) {
+              resultBox.replaceChildren(h('div', { class: 'match-banner match-banner--miss' }, [
+                h('span', { class: 'match-banner__icon' }, '×'),
+                h('div', {}, '导入失败：' + e.message),
+              ]));
+              toast('导入失败：' + e.message, 'error', 5000);
+            } finally {
+              // 注意：FormData 请求不能经过 api() 的 JSON 序列化分支
+              btn.disabled = false; btn.textContent = '开始导入';
+            }
+          },
+        }, '开始导入'),
+      ],
+    });
+  }
+
+  function doExport() {
+    const q = Object.assign({}, state.filters, { keyword: state.keyword });
+    download('/api/items/export?' + qs(q));
+    toast('正在生成 Excel，请留意浏览器下载', 'info');
+  }
+
+  await loadMeta();
+  load(1);
+})();
+</script>
+</body>
+</html>

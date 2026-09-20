@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>权限设置 · 售后返件登记系统</title>
+<link rel="stylesheet" href="/static/assets/app.css??v=20260920e">
+</head>
+<body>
+<script src="/static/assets/common.js??v=20260920e"></script>
+<script>
+/* 权限设置（2026-09-20 新增）
+ *
+ * 四块：用户 · 权限组 · 系统开关 · 审计日志。
+ * 权限模型是「权限组 + 权限点」两级：组管权限点清单，用户挂组。
+ * 管理员组被刻意做成「不可削减权限、不可改名、不可删除」——
+ * 否则一次误操作就能把所有人锁在系统外，而且没有恢复入口。 */
+(async () => {
+  const content = await mountLayout('auth', '权限设置',
+    '登录验证 · 用户与权限组 · 系统开关 · 审计日志',
+    [h('button', { class: 'btn btn--sm', onclick: () => load() }, '刷新')]);
+
+  let TAB = 'users';
+  let DATA = { summary: null, users: [], groups: [], perms: null, settings: null, logs: [] };
+
+  async function load() {
+    content.replaceChildren(h('div', { class: 'empty' }, '加载中…'));
+    try {
+      const [summary, users, groups, settings] = await Promise.all([
+        api('/auth/summary'), api('/auth/users'), api('/auth/groups'),
+        api('/auth/settings'),
+      ]);
+      DATA = { summary, users, groups, perms: groups, settings, logs: DATA.logs };
+    } catch (e) {
+      content.replaceChildren(h('div', { class: 'empty' },
+        '加载失败：' + e.message + '（需要「用户与权限组管理」权限）'));
+      return;
+    }
+    render();
+  }
+
+  function render() {
+    const tabs = [
+      ['users', '用户管理', `${DATA.users.rows.length} 个账号`],
+      ['groups', '权限组', `${DATA.groups.rows.length} 个组`],
+      ['settings', '系统开关', '登录验证与部署信息'],
+      ['logs', '审计日志', '登录与权限变更'],
+    ];
+    const bar = h('div', { class: 'tabs' }, tabs.map(([key, label, hint]) =>
+      h('button', {
+        class: 'tab' + (TAB === key ? ' is-active' : ''),
+        type: 'button', onclick: () => { TAB = key; render(); },
+      }, [h('span', { class: 'tab__label' }, label),
+          h('span', { class: 'tab__hint' }, hint)])));
+
+    content.replaceChildren(bar, view());
+  }
+
+  function view() {
+    if (TAB === 'groups') return groupsView();
+    if (TAB === 'settings') return settingsView();
+    if (TAB === 'logs') return logsView();
+    return usersView();
+  }
+
+  /* ---------------- ① 用户管理 ---------------- */
+
+  function usersView() {
+    const r = DATA.users;
+    const rows = r.rows.map(u => h('tr', {}, [
+      h('td', { class: 'mono' }, u.username),
+      h('td', {}, u.display_name || '—'),
+      h('td', {}, h('span', { class: 'tag tag--brand' }, u.group_name)),
+      h('td', {}, u.enabled
+        ? h('span', { class: 'tag tag--success' }, '启用')
+        : h('span', { class: 'tag tag--danger' }, '停用')),
+      h('td', {}, u.must_change_pwd
+        ? h('span', { class: 'tag tag--warning' }, '待改密') : '—'),
+      h('td', { class: 'muted small' }, u.last_login_at
+        ? fmtDateTime(u.last_login_at) : '从未登录'),
+      h('td', {}, h('div', { class: 'row-actions' }, [
+        h('button', {
+          class: 'btn btn--sm btn--ghost', type: 'button',
+          onclick: () => editUser(u),
+        }, '编辑'),
+        h('button', {
+          class: 'btn btn--sm btn--ghost', type: 'button',
+          onclick: () => resetPassword(u),
+        }, '重置密码'),
+        h('button', {
+          class: 'btn btn--sm btn--ghost', type: 'button',
+          onclick: () => removeUser(u),
+        }, '删除'),
+      ])),
+    ]));
+
+    return h('div', {}, [
+      h('div', { class: 'card mb12' }, [
+        h('div', { class: 'card__head' }, [
+          h('div', { class: 'card__title' }, '账号列表'),
+          h('div', { class: 'card__tools' }, [
+            h('button', {
+              class: 'btn btn--sm btn--primary', onclick: () => editUser(null),
+            }, '新增账号'),
+          ]),
+        ]),
+        h('div', { class: 'card__body' }, [
+          h('div', { class: 'small muted mb12' },
+            '新增的账号默认要求首次登录后改密 —— 管理员不需要知道每个人的最终密码。'),
+          h('div', { class: 'table-wrap', style: { maxHeight: '460px' } },
+            h('table', { class: 'table table--compact' }, [
+              h('thead', {}, h('tr', {},
+                ['账号', '姓名', '权限组', '状态', '密码', '最后登录', '操作']
+                  .map(t => h('th', {}, t)))),
+              h('tbody', {}, rows),
+            ])),
+        ]),
+      ]),
+      sessionCard(),
+    ]);
+  }
+
+  function sessionCard() {
+    const s = DATA.summary || {};
+    return h('div', { class: 'card' }, [
+      h('div', { class: 'card__head' },
+        h('div', { class: 'card__title' }, '当前登录会话')),
+      h('div', { class: 'card__body' },
+        h('div', { class: 'grid grid--4' }, [
+          infoBox('账号总数', `${s.users} 个（启用 ${s.enabled_users}）`),
+          infoBox('权限组', `${s.groups} 个`),
+          infoBox('活跃会话', `${s.sessions} 个`),
+          infoBox('会话有效期', `${s.session_hours} 小时`),
+        ])),
+    ]);
+  }
+
+  function editUser(u) {
+    const isNew = !u;
+    const nameI = h('input', { class: 'input', placeholder: '登录用的账号（英文/数字）' });
+    const dispI = h('input', { class: 'input', placeholder: '显示名（留空则用账号）' });
+    const pwdI = h('input', { class: 'input', type: 'password',
+                              placeholder: isNew ? '初始密码（至少 4 位）' : '留空则不修改' });
+    const groupS = h('select', { class: 'select' },
+      DATA.users.groups.map(g => h('option', { value: String(g.id) }, g.name)));
+    const enabledCb = h('input', { type: 'checkbox' });
+    const err = h('div', { class: 'form-error hidden' });
+
+    if (!isNew) {
+      nameI.value = u.username; nameI.disabled = true;
+      dispI.value = u.display_name || '';
+      groupS.value = String(u.group_id || '');
+      enabledCb.checked = u.enabled;
+    } else {
+      enabledCb.checked = true;
+    }
+
+    const btn = h('button', { class: 'btn btn--primary' }, isNew ? '创建' : '保存');
+    const m = openModal({
+      title: isNew ? '新增账号' : `编辑账号 · ${u.username}`, narrow: true,
+      body: h('div', {}, [
+        err,
+        h('div', { class: 'field' }, [h('label', { class: 'field__label' }, '账号'), nameI]),
+        h('div', { class: 'field' }, [h('label', { class: 'field__label' }, '姓名'), dispI]),
+        h('div', { class: 'field' }, [h('label', { class: 'field__label' }, '权限组'), groupS]),
+        h('div', { class: 'field' }, [h('label', { class: 'field__label' }, '密码'), pwdI]),
+        h('label', { class: 'switch' }, [
+          enabledCb, h('span', { class: 'switch__track' }),
+          h('span', { class: 'switch__label' }, '启用该账号'),
+        ]),
+        isNew ? h('div', { class: 'small muted mt12' },
+          '创建后该账号首次登录会被要求修改初始密码。') : null,
+      ]),
+      footer: [h('button', { class: 'btn', onclick: () => m.close() }, '取消'), btn],
+    });
+
+    const fail = msg => { err.textContent = msg; err.classList.remove('hidden'); };
+    btn.onclick = async () => {
+      err.classList.add('hidden');
+      btn.disabled = true;
+      try {
+        if (isNew) {
+          await api('/auth/users', { method: 'POST', body: {
+            username: nameI.value.trim(), display_name: dispI.value.trim(),
+            password: pwdI.value, group_id: Number(groupS.value),
+            must_change_pwd: true } });
+          toast('账号已创建', 'success');
+        } else {
+          await api('/auth/users/' + u.id, { method: 'PUT', body: {
+            display_name: dispI.value.trim(), group_id: Number(groupS.value),
+            enabled: enabledCb.checked,
+            password: pwdI.value || null } });
+          toast('已保存', 'success');
+        }
+        m.close();
+        load();
+      } catch (e) { fail(e.message); btn.disabled = false; }
+    };
+  }
+
+  function resetPassword(u) {
+    const p1 = h('input', { class: 'input', type: 'password', placeholder: '新密码（至少 4 位）' });
+    const p2 = h('input', { class: 'input', type: 'password', placeholder: '再输一次' });
+    const err = h('div', { class: 'form-error hidden' });
+    const btn = h('button', { class: 'btn btn--primary' }, '重置并强制改密');
+    const m = openModal({
+      title: `重置密码 · ${u.username}`, narrow: true,
+      body: h('div', {}, [
+        err,
+        h('div', { class: 'hint-info mb12' },
+          '重置后该账号所有已登录设备会立即掉线，且下次登录必须再改一次密码。'),
+        h('div', { class: 'field' }, [h('label', { class: 'field__label' }, '新密码'), p1]),
+        h('div', { class: 'field' }, [h('label', { class: 'field__label' }, '确认'), p2]),
+      ]),
+      footer: [h('button', { class: 'btn', onclick: () => m.close() }, '取消'), btn],
+    });
+    const fail = msg => { err.textContent = msg; err.classList.remove('hidden'); };
+    btn.onclick = async () => {
+      err.classList.add('hidden');
+      if (p1.value.length < 4) return fail('密码至少 4 位');
+      if (p1.value !== p2.value) return fail('两次输入不一致');
+      btn.disabled = true;
+      try {
+        await api('/auth/users/' + u.id, { method: 'PUT',
+          body: { password: p1.value } });
+        m.close();
+        toast('密码已重置', 'success');
+        load();
+      } catch (e) { fail(e.message); btn.disabled = false; }
+    };
+  }
+
+  async function removeUser(u) {
+    const ok = await confirmDialog(
+      // 用户名允许含 < > 等字符（实测可原样存库），而 confirmDialog 内部
+      // 走 innerHTML 渲染 —— 不转义会把用户输入当 HTML 解析，轻则显示错乱，
+      // 重则构成存储型 XSS。
+      `确认删除账号「${escapeHtml(u.username)}」？该账号的登录会话会一并清除。`,
+      { title: '删除账号', danger: true });
+    if (!ok) return;
+    try {
+      await api('/auth/users/' + u.id, { method: 'DELETE' });
+      toast('已删除', 'success');
+      load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  /* ---------------- ② 权限组 ---------------- */
+
+  function groupsView() {
+    const cards = DATA.groups.rows.map(g => h('div', {
+      class: 'dsrow' + (g.locked ? ' is-on' : ''),
+    }, [
+      h('div', { class: 'dsrow__main' }, [
+        h('div', { class: 'dsrow__name' }, [
+          g.name,
+          g.builtin ? h('span', { class: 'tag' }, '内置') : null,
+          g.locked ? h('span', { class: 'tag tag--warning' }, '权限锁定') : null,
+        ]),
+        h('div', { class: 'dsrow__desc' }, g.description || '（无说明）'),
+      ]),
+      h('div', { class: 'dsrow__n' }, `${g.count} 项权限 · ${g.user_count} 人`),
+      h('div', { class: 'row-actions' }, [
+        h('button', {
+          class: 'btn btn--sm btn--ghost', type: 'button',
+          onclick: () => editGroup(g),
+        }, g.locked ? '查看' : '编辑'),
+        g.builtin ? null : h('button', {
+          class: 'btn btn--sm btn--ghost', type: 'button',
+          onclick: () => removeGroup(g),
+        }, '删除'),
+      ]),
+    ]));
+
+    return h('div', {}, [
+      h('div', { class: 'card mb12' }, [
+        h('div', { class: 'card__head' }, [
+          h('div', { class: 'card__title' }, '权限组'),
+          h('div', { class: 'card__tools' }, [
+            h('button', {
+              class: 'btn btn--sm btn--primary', onclick: () => editGroup(null),
+            }, '新建权限组'),
+          ]),
+        ]),
+        h('div', { class: 'card__body' }, [
+          h('div', { class: 'hint-info mb12' },
+            '权限分两类：**界面访问**决定能看到哪些菜单与页面，'
+            + '**数据操作 / 系统管理**决定能执行哪些动作（服务端独立校验，'
+            + '改前端代码绕不过去）。'),
+          h('div', { class: 'dslist' }, cards),
+        ]),
+      ]),
+      h('div', { class: 'card' }, [
+        h('div', { class: 'card__head' },
+          h('div', { class: 'card__title' }, '内置权限组的设计取舍')),
+        h('div', { class: 'card__body' },
+          h('div', { class: 'small muted', style: { lineHeight: '1.9' } }, [
+            h('div', {}, '· 管理员 —— 权限不可修改、不可改名、不可删除。'
+              + '这是刻意的：减掉它自己的权限或删掉它，系统里就再没有人能改回来了。'),
+            h('div', {}, '· 登记员 —— 日常登记与查询，不含删除、不含用户与接口配置。'),
+            h('div', {}, '· 只读 —— 只能查看与导出。'),
+            h('div', { class: 'mt8' },
+              '需要更细的岗位划分时，新建自定义组即可；内置组也可以改权限'
+              + '（管理员组除外）。'),
+          ])),
+      ]),
+    ]);
+  }
+
+  function editGroup(g) {
+    const isNew = !g;
+    const nameI = h('input', { class: 'input', placeholder: '权限组名称' });
+    const descI = h('input', { class: 'input', placeholder: '说明：这个组是给谁用的' });
+    const err = h('div', { class: 'form-error hidden' });
+    const countEl = h('span', { class: 'perm-sec__n' });
+    let boxes = [];
+
+    if (!isNew) {
+      nameI.value = g.name;
+      if (g.builtin) nameI.disabled = true;
+      descI.value = g.description || '';
+    }
+
+    const groups = DATA.perms.permission_groups.map(sec => {
+      const items = sec.perms.map(p => {
+        const cb = h('input', {
+          type: 'checkbox', value: p.key,
+          checked: (!isNew && g.perms.includes(p.key)) ? 'checked' : null,
+          disabled: (!isNew && g.locked) ? true : null,
+        });
+        cb.addEventListener('change', refresh);
+        boxes.push(cb);
+        return h('label', { class: 'colpick__item' }, [cb, h('span', {}, p.label)]);
+      });
+      return h('div', { class: 'perm-sec' }, [
+        h('div', { class: 'perm-sec__title' }, [sec.title,
+          h('span', { class: 'perm-sec__n' }, `${sec.perms.length} 项`)]),
+        h('div', { class: 'colpick__grid' }, items),
+      ]);
+    });
+
+    const saveBtn = h('button', { class: 'btn btn--primary' },
+      isNew ? '创建' : '保存权限');
+    const m = openModal({
+      title: isNew ? '新建权限组'
+        : (g.locked ? `查看权限组 · ${g.name}` : `编辑权限组 · ${g.name}`),
+      body: h('div', {}, [
+        err,
+        h('div', { class: 'grid grid--2' }, [
+          h('div', { class: 'field' }, [
+            h('label', { class: 'field__label' }, '名称'), nameI]),
+          h('div', { class: 'field' }, [
+            h('label', { class: 'field__label' }, '说明'), descI]),
+        ]),
+        g && g.locked ? h('div', { class: 'hint-danger mb12' },
+          '内置管理员组的权限被锁定，无法修改 —— 避免误操作把所有人锁在系统外。'
+          + '要限制某个人，请把他放进别的权限组。') : null,
+        h('div', { class: 'colpick__bar' }, [
+          h('div', { class: 'small muted' }, '勾选该组拥有的权限'),
+          h('div', { class: 'colpick__bar-right' }, [countEl]),
+        ]),
+        ...groups,
+      ]),
+      footer: g && g.locked
+        ? [h('button', { class: 'btn', onclick: () => m.close() }, '关闭')]
+        : [h('button', {
+            class: 'btn', onclick: () => {
+              boxes.forEach(b => { b.checked = true; }); refresh();
+            },
+          }, '全选'),
+          h('button', {
+            class: 'btn', onclick: () => {
+              boxes.forEach(b => { b.checked = false; }); refresh();
+            },
+          }, '全不选'),
+          saveBtn],
+    });
+
+    function refresh() {
+      const n = boxes.filter(b => b.checked).length;
+      countEl.textContent = `已选 ${n} / ${boxes.length} 项`;
+      saveBtn.disabled = n === 0;
+    }
+    refresh();
+
+    const fail = msg => { err.textContent = msg; err.classList.remove('hidden'); };
+    saveBtn.onclick = async () => {
+      err.classList.add('hidden');
+      const perms = boxes.filter(b => b.checked).map(b => b.value);
+      const body = {
+        name: nameI.value.trim(), description: descI.value.trim(), perms };
+      saveBtn.disabled = true;
+      try {
+        if (isNew) await api('/auth/groups', { method: 'POST', body });
+        else await api('/auth/groups/' + g.id, { method: 'PUT', body });
+        m.close();
+        toast('已保存', 'success');
+        load();
+      } catch (e) { fail(e.message); saveBtn.disabled = false; }
+    };
+  }
+
+  async function removeGroup(g) {
+    const ok = await confirmDialog(
+      `确认删除权限组「${escapeHtml(g.name)}」？组内还有用户时不允许删除。`,
+      { title: '删除权限组', danger: true });
+    if (!ok) return;
+    try {
+      await api('/auth/groups/' + g.id, { method: 'DELETE' });
+      toast('已删除', 'success');
+      load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  /* ---------------- ③ 系统开关 ---------------- */
+
+  function settingsView() {
+    const s = DATA.settings;
+    const cb = h('input', { type: 'checkbox', checked: s.auth_enabled ? 'checked' : null });
+    cb.addEventListener('change', async () => {
+      if (!cb.checked && !confirm('关闭后所有人都能直接访问系统，不再需要登录。确定关闭？')) {
+        cb.checked = true; return;
+      }
+      try {
+        await api('/auth/settings', { method: 'PUT',
+          body: { auth_enabled: cb.checked } });
+        toast(cb.checked ? '登录验证已开启' : '登录验证已关闭', 'success');
+        load();
+      } catch (e) { toast(e.message, 'error'); cb.checked = !cb.checked; }
+    });
+
+    const dbRows = Object.entries(s.databases || {}).map(([k, v]) =>
+      h('tr', {}, [
+        h('td', {}, h('span', { class: 'tag' }, k)),
+        h('td', { class: 'mono small cell-wrap' }, v),
+      ]));
+
+    // 备份状态卡：定时备份失败是**静默**的 —— 没人天天看 journal，
+    // 等到要恢复时才发现最近一份是三个月前的。放到界面上让它自己浮出来。
+    const bk = s.backup || {};
+    const bkBad = !bk.ok || bk.stale;
+    const bkTag = !bk.ok
+      ? h('span', { class: 'tag tag--danger' }, bk.at ? '最近一次失败' : '从未备份')
+      : (bk.stale ? h('span', { class: 'tag tag--warning' }, '已超期')
+                  : h('span', { class: 'tag tag--success' }, '正常'));
+    const sizeMB = bk.bytes ? (bk.bytes / 1048576).toFixed(2) + ' MB' : '—';
+    const backupCard = h('div', { class: 'card mb12' }, [
+      h('div', { class: 'card__head' }, [
+        h('div', { class: 'card__title' }, '数据备份'),
+        h('div', { class: 'card__tools' }, bkTag),
+      ]),
+      h('div', { class: 'card__body' }, [
+        h('div', { class: 'grid grid--4' }, [
+          infoBox('最近一次备份', bk.at || '（无记录）'),
+          infoBox('距今', bk.age_hours === null || bk.age_hours === undefined
+            ? '—' : `${bk.age_hours} 小时`),
+          infoBox('备份大小', sizeMB),
+          infoBox('超期阈值', `${bk.stale_hours || 30} 小时`),
+        ]),
+        h('div', {
+          class: bkBad ? 'hint-danger' : 'hint-info',
+          style: { marginTop: '12px' },
+        }, bk.note || ''),
+        bk.path ? h('div', { class: 'small muted mono cell-wrap',
+                             style: { marginTop: '8px' } }, bk.path) : null,
+        h('div', { class: 'small muted', style: { marginTop: '8px' } },
+          '备份由 tools/backup.py 产出（五库一致性快照 + 照片）。'
+          + '定时执行见 deploy/ars-backup.timer（systemd）或 docker-compose.yml 的 backup 服务。'),
+      ]),
+    ]);
+
+    return h('div', {}, [
+      h('div', { class: 'card mb12' }, [
+        h('div', { class: 'card__head' }, [
+          h('div', { class: 'card__title' }, '登录验证'),
+          h('div', { class: 'card__tools' },
+            h('span', { class: `tag ${s.auth_enabled ? 'tag--success' : 'tag--danger'}` },
+              s.auth_enabled ? '已开启' : '已关闭')),
+        ]),
+        h('div', { class: 'card__body' }, [
+          h('label', { class: 'switch' }, [
+            cb, h('span', { class: 'switch__track' }),
+            h('span', { class: 'switch__label' },
+              s.auth_enabled ? '要求登录后才能使用系统' : '关闭中：任何人访问本机地址都可直接使用'),
+          ]),
+          h('div', { class: s.auth_enabled ? 'hint-info' : 'hint-danger',
+                     style: { marginTop: '12px' } },
+            s.auth_enabled
+              ? '未登录访问页面会跳转到登录页，调用接口会返回 401。'
+              : '当前任何人只要能访问到这个地址就能读写全部数据 —— '
+                + '本地单人使用可以，一旦要在局域网或公网开放，请先开启登录验证。'),
+          h('div', { class: 'divider' }),
+          h('div', { class: 'grid grid--4' }, [
+            infoBox('会话有效期', `${s.session_hours} 小时`),
+            infoBox('Cookie Secure', s.cookie_secure ? '已开启' : '未开启'),
+            infoBox('强制 HTTPS', s.https_only ? '已开启' : '未开启'),
+            infoBox('监听地址', `${s.host}:${s.port}`, true),
+          ]),
+        ]),
+      ]),
+
+      backupCard,
+
+      h('div', { class: 'card mb12' }, [
+        h('div', { class: 'card__head' },
+          h('div', { class: 'card__title' }, '部署相关（只读）')),
+        h('div', { class: 'card__body' }, [
+          h('div', { class: 'small muted mb12' },
+            '这些项通过环境变量注入，改完需重启服务。服务器部署时用环境变量覆盖，'
+            + '配置文件保持原样即可随代码一起更新。'),
+          h('div', { class: 'grid grid--2' }, [
+            infoBox('对外访问地址 PUBLIC_BASE_URL',
+                    s.public_base_url || '（未设置，按本机地址）', true),
+            infoBox('跨域来源 CORS_ORIGINS',
+                    (s.cors_origins || []).join(', ') || '（同源部署，未开放跨域）', true),
+            infoBox('受信任代理 TRUSTED_PROXIES',
+                    (s.trusted_proxies || []).join(', ') || '（无）', true),
+          ]),
+          h('div', { class: 'codebox mt12' },
+            'ARS_HOST=0.0.0.0            # 允许局域网/公网访问\n'
+            + 'ARS_PORT=8000               # 主界面端口\n'
+            + 'ARS_PUBLIC_BASE_URL=https://returns.example.com\n'
+            + 'ARS_COOKIE_SECURE=1         # 走 HTTPS 时必须开\n'
+            + 'ARS_HTTPS_ONLY=1            # 拒绝明文 HTTP 登录\n'
+            + 'ARS_OPEN_API_HOST=0.0.0.0   # 数据接口对外（金山定时任务要访问）\n'
+            + 'ARS_OPEN_API_PORT=8100\n'
+            + 'ARS_CORS_ORIGINS=            # 同源部署留空'),
+        ]),
+      ]),
+
+      h('div', { class: 'card' }, [
+        h('div', { class: 'card__head' },
+          h('div', { class: 'card__title' }, '数据文件')),
+        h('div', { class: 'card__body' },
+          h('table', { class: 'table table--compact' },
+            h('tbody', {}, dbRows))),
+      ]),
+    ]);
+  }
+
+  /* ---------------- ④ 审计日志 ---------------- */
+
+  function logsView() {
+    const host = h('div', { class: 'table-wrap', style: { maxHeight: '600px' } },
+      h('div', { class: 'empty' }, '加载中…'));
+    loadLogs(host);
+    return h('div', { class: 'card' }, [
+      h('div', { class: 'card__head' }, [
+        h('div', { class: 'card__title' }, '审计日志'),
+        h('div', { class: 'card__hint' },
+          '登录 / 退出 / 密码变更 / 用户与权限组变更 / 接口令牌与白名单变更'),
+      ]),
+      h('div', { class: 'card__body' }, host),
+    ]);
+  }
+
+  async function loadLogs(box) {
+    try {
+      const r = await api('/auth/logs?limit=200');
+      if (!r.rows.length) {
+        box.replaceChildren(h('div', { class: 'empty' }, '暂无记录'));
+        return;
+      }
+      const head = h('tr', {}, ['时间', '动作', '对象', '说明', '操作者']
+        .map(t => h('th', {}, t)));
+      const body = r.rows.map(x => h('tr', {}, [
+        h('td', { class: 'muted small' }, fmtDateTime(x.created_at)),
+        h('td', {}, actionTag(x.action)),
+        h('td', { class: 'mono' }, x.detail_key || '—'),
+        h('td', { class: 'cell-wrap small' }, x.payload || ''),
+        h('td', {}, x.operator || '—'),
+      ]));
+      box.replaceChildren(h('table', { class: 'table table--compact' }, [
+        h('thead', {}, head), h('tbody', {}, body)]));
+    } catch (e) {
+      box.replaceChildren(h('div', { class: 'empty' }, '加载失败：' + e.message));
+    }
+  }
+
+  function actionTag(a) {
+    const danger = ['login.fail', 'user.delete', 'group.delete', 'access.token'];
+    const warn = ['user.create', 'user.update', 'group.create', 'group.update',
+                  'password.change', 'settings.auth_enabled', 'access.ips',
+                  'access.scopes'];
+    const cls = danger.includes(a) ? 'tag--danger'
+      : (warn.includes(a) ? 'tag--warning' : 'tag--success');
+    const label = {
+      'login': '登录', 'login.fail': '登录失败', 'logout': '退出',
+      'password.change': '改密', 'user.create': '新增用户',
+      'user.update': '改用户', 'user.delete': '删用户',
+      'group.create': '新增权限组', 'group.update': '改权限组',
+      'group.delete': '删权限组', 'access.token': '重置令牌',
+      'access.ips': '改 IP 白名单', 'access.scopes': '改数据范围',
+      'settings.auth_enabled': '登录验证开关',
+    }[a] || a;
+    return h('span', { class: `tag ${cls}` }, label);
+  }
+
+  /* ---------------- 小工具 ---------------- */
+
+  function infoBox(label, value, mono) {
+    return h('div', { class: 'field', style: { marginBottom: '0' } }, [
+      h('label', { class: 'field__label' }, label),
+      h('div', { class: mono ? 'mono' : '', style: { fontSize: '12.5px' } },
+        String(value ?? '—')),
+    ]);
+  }
+
+  /* 首屏渲染放在最后：上面都是函数声明，这里才真正执行 ——
+     页面脚本是单个 IIFE，中途调用依赖后置 let/const 会触发 TDZ 并中断整段脚本。 */
+  load();
+})();
+</script>
+</body>
+</html>

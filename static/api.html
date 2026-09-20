@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>数据接口 · 售后返件登记系统</title>
+<link rel="stylesheet" href="/static/assets/app.css??v=20260920e">
+</head>
+<body>
+<script src="/static/assets/common.js??v=20260920e"></script>
+<script>
+/* 数据接口（2026-09-20 由「同步设置」改造而来）
+ *
+ * 方向变了：原先由本系统主动「推送」到金山文档（要持有金山凭据、要维护
+ * 推送队列），现改由 **金山文档的定时任务来这里拉取**。所以本页关心的是
+ * 「怎么让外部安全地拿到数据」，而不是「推成功了没有」。
+ *
+ * 页面上的令牌 / 白名单 / 数据范围三项都是即时生效的，改完刷新一下金山侧
+ * 即可；不需要重启服务。 */
+(async () => {
+  const content = await mountLayout('api', '数据接口',
+    '对外提供数据拉取接口，供金山文档定时任务取数（独立端口，令牌 + IP 白名单）',
+    [
+      h('button', { class: 'btn btn--sm', onclick: () => load() }, '刷新'),
+      h('button', { class: 'btn btn--sm btn--danger', onclick: rotateToken }, '重置令牌'),
+    ]);
+
+  let ST = null;          // 最近一次 /access/status
+  let ipBox = null;       // 白名单输入框（渲染时捕获，不靠 querySelector 找）
+  let dsState = [];       // 数据集行 [{key, cb, node}] —— 每次渲染重建
+  let scopeCount = null;  // 「已选 N / M」节点
+  let kdocsBox = {};      // 金山侧目标输入框 {file_id, drive_id, sheet}
+
+  /* 金山侧目标位置（2026-09-20 起由只读展示改为可填写）。
+     顺序即页面上的排列顺序；placeholder 给的是「该填什么样」的例子。 */
+  const KDOCS_FIELDS = [
+    { key: 'file_id', label: '目标文件 ID',
+      ph: '如 qAqmwXpUP1Mji2UbPz7orxkqEBjTbWH4Z' },
+    { key: 'drive_id', label: '云盘 ID', ph: '如 614043991' },
+    { key: 'sheet', label: '落点工作表', ph: '如 服务器数据' },
+  ];
+
+  async function load() {
+    content.replaceChildren(h('div', { class: 'empty' }, '加载中…'));
+    try {
+      [ST] = await Promise.all([api('/access/status')]);
+    } catch (e) {
+      content.replaceChildren(h('div', { class: 'empty' }, '加载失败：' + e.message));
+      return;
+    }
+    render();
+  }
+
+  function render() {
+    const base = `http://${ST.host}:${ST.port}`;
+    const k = ST.kdocs || {};
+
+    /* ---------------- ① 运行状态 ---------------- */
+    const running = ST.enabled && ST.thread_alive;
+    const exposed = ST.public;
+    const statusCard = card('运行状态', [
+      h('span', { class: `tag ${running ? 'tag--success' : 'tag--danger'}` },
+        running ? '运行中' : (ST.enabled ? '启动失败' : '已在配置中关闭')),
+    ], [
+      h('div', {
+        class: 'match-banner mb12 '
+          + (!running ? 'match-banner--danger'
+            : (exposed ? 'match-banner--multi' : 'match-banner--hit')),
+      }, [
+        h('span', { class: 'match-banner__icon' },
+          !running ? '!' : (exposed ? '!' : '○')),
+        h('div', {}, [
+          h('div', {}, !running
+            ? (ST.enabled ? '开放接口未在运行，请重启服务查看启动日志。'
+                          : '开放接口已在配置中关闭（ARS_OPEN_API=0）。')
+            : (exposed
+              ? '接口已对其它机器开放。请确认已设置访问令牌与来源 IP 白名单，'
+                + '并在放行端口前想清楚谁能访问。'
+              : '接口仅监听本机。金山文档的定时任务在云端，访问不到 127.0.0.1 —— '
+                + '正式启用时需改为 0.0.0.0 并在防火墙放行该端口。')),
+          h('div', { class: 'small mt8' },
+            `监听 ${base} · 主界面 ${location.origin}`),
+        ]),
+      ]),
+      h('div', { class: 'grid grid--4' }, [
+        infoBox('监听地址', `${ST.host}:${ST.port}`, true),
+        infoBox('可用数据集', `${ST.scopes.length} / ${ST.datasets.length}`),
+        infoBox('累计被拉取', num(ST.pull_total) + ' 次'),
+        infoBox('自上次拉取新增', num(ST.new_since_last_pull) + ' 条'),
+      ]),
+      ST.last_pull ? h('div', { class: 'mt12 small muted' },
+        `最近一次拉取：${fmtDateTime(ST.last_pull.created_at)} · `
+        + `来源 ${ST.last_pull.ip || '—'} · ${ST.last_pull.dataset || '—'} · `
+        + `${num(ST.last_pull.rows)} 条`) : null,
+    ]);
+
+    /* ---------------- ② 接口地址与令牌 ---------------- */
+    // 令牌只以掩码形式展示：接口本身也只返回掩码，明文仅在「重置」时一次性下发。
+    // 这样接口即使被同账号的其它人调用，也拿不到完整令牌。
+    const tokenRow = h('div', { class: 'keyline' }, [
+      h('div', { class: 'codebox', style: { flex: '1 1 auto' } }, ST.token_masked),
+      h('button', {
+        class: 'btn btn--sm', type: 'button', onclick: rotateToken,
+      }, '重置令牌'),
+    ]);
+
+    const urlCard = card('接口地址与令牌', [
+      h('span', { class: 'tag' },
+        ST.ip_restricted ? '已限制来源 IP' : '未限制来源 IP'),
+    ], [
+      h('div', { class: 'small muted mb8' },
+        '连通性测试（不需要令牌，用于确认网络可达）：'),
+      h('div', { class: 'codebox mb12' }, `${base}/api/open/health`),
+
+      h('div', { class: 'small muted mb8' },
+        '访问令牌（放在 Authorization: Bearer 头，或 ?token= 参数）：'),
+      tokenRow,
+      h('div', { class: 'hint-info mt12' },
+        '令牌只在「重置」时完整显示一次，之后只保留掩码 —— 避免截图或投屏时泄漏。'
+        + '重置后旧令牌立即失效，需要同步更新金山侧的配置。'),
+
+      h('div', { class: 'divider' }),
+      h('div', { class: 'small muted mb8' }, '调用示例（增量拉取上次之后变化的数据）：'),
+      h('div', { class: 'codebox' },
+        `curl -H "Authorization: Bearer <令牌>" \\\n`
+        + `  "${base}/api/open/data/detail?since=<上次拉取时间>&limit=2000"\n\n`
+        + `# 或直接下载文件（csv / xlsx）\n`
+        + `curl -H "Authorization: Bearer <令牌>" \\\n`
+        + `  "${base}/api/open/export/detail.xlsx?since=<上次拉取时间>"`),
+      h('div', { class: 'small muted mt8' },
+        '返回体里的 next_offset 不为 0 时，带上它继续翻下一页；'
+        + 'rows 为空即说明没有新数据。'),
+    ]);
+
+    /* ---------------- ③ 数据范围 ---------------- */
+    // 不要把勾选框对象塞进 h() 的 attrs —— h() 只识别 class/style/dataset/on*
+    // 等固定键，其余一律 setAttribute（对象会被转成字符串），
+    // 取回来时就是 undefined 而不是元素。这里用一份并行的数组存引用。
+    dsState = ST.datasets.map(d => {
+      const cb = h('input', {
+        type: 'checkbox', checked: d.allowed ? 'checked' : null,
+        onchange: () => syncScopes(),
+      });
+      const node = h('label', {
+        class: 'dsrow' + (d.allowed ? ' is-on' : ''),
+        dataset: d.key,
+      }, [
+        cb,
+        h('div', { class: 'dsrow__main' }, [
+          h('div', { class: 'dsrow__name' }, [d.label, h('code', {}, d.key)]),
+          h('div', { class: 'dsrow__desc' }, d.desc),
+        ]),
+        h('div', { class: 'dsrow__n' },
+          `${num(d.rows)} 行 · ${d.columns.length} 列`),
+      ]);
+      return { key: d.key, cb, node };
+    });
+    scopeCount = h('span', { class: 'card__hint' });
+    const dsCard = card('数据范围', [
+      h('button', { class: 'btn btn--sm btn--primary', onclick: saveScopes }, '保存范围'),
+    ], [
+      h('div', { class: 'small muted mb12' },
+        '只勾选金山侧真正需要的表。授权越少，万一令牌泄漏的暴露面越小。'
+        + '默认只授权「明细汇总」——它已经把退回 / 检测 / 处理拼成一张平表，'
+        + '金山侧一次拉取即可建表，不必自己做多表关联。'),
+      h('div', { class: 'dslist' }, dsState.map(x => x.node)),
+      scopeCount,
+    ]);
+
+    syncScopes();
+
+    /* ---------------- ④ 来源 IP 白名单 ---------------- */
+    const ipI = h('textarea', {
+      class: 'textarea', rows: 3,
+      placeholder: '每行或逗号分隔，支持单 IP 与网段，如\n203.0.113.10\n203.0.113.0/24\n留空 = 不限制来源',
+    });
+    ipI.value = (ST.ips || []).join('\n');
+    ipBox = ipI;
+    const ipCard = card('来源 IP 白名单', [
+      h('span', { class: `tag ${ST.ip_restricted ? 'tag--success' : 'tag--warning'}` },
+        ST.ip_restricted ? '已启用' : '未启用（任何来源均可访问）'),
+    ], [
+      ipI,
+      h('div', { class: 'mt12' }, h('button', {
+        class: 'btn btn--sm btn--primary', onclick: saveIps,
+      }, '保存白名单')),
+      h('div', { class: 'hint-info mt12' },
+        '留空表示不限制 —— 只要令牌正确就能访问，令牌强度就是唯一的防线。'
+        + '若金山侧出口 IP 固定，建议填上；若不确定，先留空、靠令牌保护，'
+        + '并在防火墙层面限制端口可达范围。'),
+    ]);
+
+    /* ---------------- ⑤ 金山侧配置要点（可填写） ---------------- */
+    // 这三项从「只读展示」改为「可填写」：金山侧换文件 / 换工作表时在界面
+    // 改一下即可，不用改 config.py 再重启服务。
+    kdocsBox = {};
+    const kdocsCard = card('金山文档定时任务', [
+      h('span', { class: 'tag tag--brand' }, '拉取方向'),
+      h('button', { class: 'btn btn--sm btn--primary', onclick: saveKdocs }, '保存'),
+      h('button', { class: 'btn btn--sm', onclick: resetKdocs }, '恢复默认'),
+    ], [
+      h('div', { class: 'small muted mb12' },
+        '本系统不再主动写入金山文档。请改为在金山的自动化 / 定时任务里'
+        + '按固定周期调用上面的接口，把返回的数据写入目标表。'),
+      h('div', { class: 'small muted mb8' },
+        '按金山侧的实际目标填写（改完点右上角「保存」）：'),
+      h('div', { class: 'grid grid--3' }, KDOCS_FIELDS.map(f => {
+        // 输入框引用在渲染时当场捕获 —— 每次 render 都会重建 DOM，
+        // 之后再用 querySelector 找会拿到旧节点，保存时读到的是上一次的值
+        const i = h('input', {
+          class: 'input', placeholder: f.ph, dataset: { field: f.key },
+        });
+        i.value = k[f.key] || '';
+        kdocsBox[f.key] = i;
+        return h('div', { class: 'field', style: { marginBottom: '0' } }, [
+          h('label', { class: 'field__label' }, f.label),
+          i,
+        ]);
+      })),
+      h('div', { class: 'small muted mt8 mb12' },
+        '这三项只用于本页展示与下面的说明文字，不影响接口行为；'
+        + '留空即为「没填」，想回到系统内置值点「恢复默认」。'),
+      h('div', { class: 'small muted mb8' }, '定时任务里需要做的三件事：'),
+      h('div', { class: 'codebox' },
+        '① GET  /api/open/datasets        → 取字段清单，用于校验表头\n'
+        + '② GET  /api/open/data/detail?since=<上次成功时间>\n'
+        + '     → 取增量数据（rows 为空即无新增）\n'
+        + '③ 把 rows 追加写入「' + (k.sheet || '（上方未填工作表名）') + '」\n'
+        + '\n'
+        + '建议：把本次成功时间记在一个单元格里，下次作为 since 传回来；\n'
+        + '    这样即使中断几天，恢复后也能把漏掉的数据补齐。'),
+      h('div', { class: 'hint-info mt12' },
+        '接口地址要填「能被公网访问的地址」。本机 127.0.0.1 只对这台机器有效，'
+        + '金山侧需要的是域名或公网 IP（必要时经反向代理转发，并启用 HTTPS —— '
+        + '令牌走明文 HTTP 有被截获的风险）。'),
+    ]);
+
+    /* ---------------- ⑥ 拉取日志 ---------------- */
+    const logHost = h('div', { class: 'table-wrap', style: { maxHeight: '320px' } },
+      h('div', { class: 'empty' }, '加载中…'));
+    const logCard = card('拉取日志', [
+      h('button', { class: 'btn btn--sm', onclick: () => loadLogs(logHost) },
+        '刷新日志'),
+    ], [logHost]);
+    loadLogs(logHost);
+
+    content.replaceChildren(statusCard, urlCard, dsCard, ipCard, kdocsCard, logCard);
+    syncScopes();
+  }
+
+  function syncScopes() {
+    const n = dsState.filter(r => r.cb.checked).length;
+    dsState.forEach(r => r.node.classList.toggle('is-on', r.cb.checked));
+    if (scopeCount) {
+      scopeCount.textContent = `已选 ${n} / ${dsState.length} 个数据集`
+        + (n === 0 ? '（一个都不选将无法拉取任何数据）' : '');
+    }
+  }
+
+  /** 拉取日志。宿主节点显式传入 —— 用 querySelector 全局找容器在重渲染后
+      会拿到旧节点（DOM 已被替换），日志就再也刷不出来了。 */
+  async function loadLogs(box) {
+    if (!box) return;
+    try {
+      const r = await api('/access/logs?limit=100');
+      if (!r.rows.length) {
+        box.replaceChildren(h('div', { class: 'empty' }, [
+          h('div', { class: 'empty__icon' }, '○'),
+          '还没有任何拉取记录 —— 金山侧配好定时任务后这里会出现调用日志',
+        ]));
+        return;
+      }
+      const head = h('tr', {}, ['时间', '来源 IP', '数据集', '接口', '条数', '结果', '说明']
+        .map(t => h('th', {}, t)));
+      const body = r.rows.map(x => h('tr', {}, [
+        h('td', { class: 'muted' }, fmtDateTime(x.created_at)),
+        h('td', { class: 'mono' }, x.ip || '—'),
+        h('td', {}, x.dataset || '—'),
+        h('td', { class: 'mono small' }, x.endpoint || '—'),
+        h('td', { class: 'num' }, num(x.rows)),
+        h('td', {}, x.ok
+          ? h('span', { class: 'tag tag--success' }, '成功')
+          : h('span', { class: 'tag tag--danger' }, '拒绝')),
+        h('td', { class: 'cell-wrap' }, x.message || ''),
+      ]));
+      box.replaceChildren(h('table', { class: 'table table--compact' }, [
+        h('thead', {}, head),
+        h('tbody', {}, body),
+      ]));
+    } catch (e) {
+      box.replaceChildren(h('div', { class: 'empty' }, '加载失败：' + e.message));
+    }
+  }
+
+  async function saveScopes() {
+    const picked = dsState.filter(r => r.cb.checked).map(r => r.key);
+    if (!picked.length && !confirm('一个数据集都不授权，金山侧将完全无法拉取数据。仍要保存吗？')) return;
+    try {
+      const r = await api('/access/config', { method: 'PUT', body: { scopes: picked } });
+      ST = { ...ST, ...r.status };
+      toast(`数据范围已保存：${picked.length} 个数据集`, 'success');
+      render();
+    } catch (e) { toast('保存失败：' + e.message, 'error'); }
+  }
+
+  async function saveIps() {
+    const ips = (ipBox.value || '').split(/[\n,;]+/).map(s => s.trim()).filter(Boolean);
+    try {
+      const r = await api('/access/config', { method: 'PUT', body: { ips } });
+      ST = { ...ST, ...r.status };
+      toast(ips.length ? `白名单已保存：${ips.length} 条` : '已清空白名单（不再限制来源）',
+            'success');
+      render();
+    } catch (e) { toast('保存失败：' + e.message, 'error'); }
+  }
+
+  async function saveKdocs() {
+    const kdocs = {};
+    KDOCS_FIELDS.forEach(f => {
+      const el = kdocsBox[f.key];
+      kdocs[f.key] = el ? (el.value || '').trim() : '';
+    });
+    try {
+      const r = await api('/access/config', { method: 'PUT', body: { kdocs } });
+      ST = { ...ST, ...r.status };
+      toast('金山侧目标信息已保存', 'success');
+      render();
+    } catch (e) { toast('保存失败：' + e.message, 'error'); }
+  }
+
+  async function resetKdocs() {
+    if (!confirm('恢复为系统内置的默认值？当前填写的 ID 与工作表名会被清掉。')) return;
+    try {
+      const r = await api('/access/config',
+        { method: 'PUT', body: { kdocs_reset: true } });
+      ST = { ...ST, ...r.status };
+      toast('已恢复默认值', 'success');
+      render();
+    } catch (e) { toast('恢复失败：' + e.message, 'error'); }
+  }
+
+  async function rotateToken() {
+    if (!confirm('重置后旧令牌立即失效，金山文档定时任务需同步更新。确定重置？')) return;
+    try {
+      const r = await api('/access/token/rotate', { method: 'POST' });
+      // 明文只在这里出现一次，直接铺出来让人复制
+      openModal({
+        title: '新令牌（只显示这一次）', narrow: true,
+        body: h('div', {}, [
+          h('div', { class: 'hint-danger mb12' },
+            '关闭这个窗口后就看不到明文了，请先复制并更新到金山侧的定时任务里。'),
+          h('div', { class: 'codebox' }, r.token),
+        ]),
+        footer: [h('button', {
+          class: 'btn btn--primary',
+          onclick: () => { copyText(r.token); },
+        }, '复制令牌')],
+      });
+      load();
+    } catch (e) { toast('重置失败：' + e.message, 'error'); }
+  }
+
+  function copyText(t) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(t);
+        toast('已复制到剪贴板', 'success');
+      } else {
+        toast('当前浏览器不支持自动复制，请手动选中复制', 'warn');
+      }
+    } catch { toast('复制失败，请手动选中复制', 'warn'); }
+  }
+
+  function card(title, tools, body) {
+    return h('div', { class: 'card mb12' }, [
+      h('div', { class: 'card__head' }, [
+        h('div', { class: 'card__title' }, title),
+        h('div', { class: 'card__tools' }, tools || []),
+      ]),
+      h('div', { class: 'card__body' }, body),
+    ]);
+  }
+
+  function infoBox(label, value, mono) {
+    return h('div', { class: 'field', style: { marginBottom: '0' } }, [
+      h('label', { class: 'field__label' }, label),
+      h('div', { class: mono ? 'mono' : '', style: { fontSize: '13px' } },
+        String(value ?? '—')),
+    ]);
+  }
+
+  load();
+})();
+</script>
+</body>
+</html>

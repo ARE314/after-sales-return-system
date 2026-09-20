@@ -1,0 +1,85 @@
+# 售后返件登记系统 —— 反向代理配置（Nginx）
+#
+# 这个文件**本身是可直接 include 的 nginx 配置**（不再是 Markdown 文档）。
+# 用法见 deploy/README.md「四、反向代理」；设计取舍与注意事项见同文件的说明段。
+#
+# 部署前必须替换的四处（不替换就一定起不来或把接口暴露错）：
+#   server_name                       -> 你的域名
+#   ssl_certificate / _key            -> 你的证书路径
+#   allow 203.0.113.0/24              -> 金山侧真实出口网段
+#   proxy_pass 里的 8000 / 8100       -> 若改过 ARS_PORT / ARS_OPEN_API_PORT 要同步
+#
+# 两个 upstream 分开，便于给数据接口单独做限速 / 访问控制。
+upstream ars_main {
+    server 127.0.0.1:8000;
+    keepalive 16;
+}
+upstream ars_openapi {
+    server 127.0.0.1:8100;
+    keepalive 16;
+}
+
+# 数据接口限速：金山侧是定时任务，正常速率极低；留一点余量即可。
+# 放在 http 段（本文件被 include 到 http 内时生效）。
+limit_req_zone $binary_remote_addr zone=ars_openapi:10m rate=5r/s;
+
+# ---------------------------------------------------------------------------
+# 1) 数据接口：对外。只放行金山侧出口网段，其余一律拒绝。
+#    程序内还有一层 token + IP 白名单，两层互为双保险。
+# ---------------------------------------------------------------------------
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name returns-api.example.com;
+
+    ssl_certificate     /etc/nginx/certs/returns.crt;
+    ssl_certificate_key /etc/nginx/certs/returns.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    # 令牌走明文等于公开，这里强制 HTTPS（与 ARS_COOKIE_SECURE=1 配套）
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    location /api/open/ {
+        allow 203.0.113.0/24;          # ← 金山侧出口网段
+        deny  all;                      # 其余一律拒绝
+        limit_req zone=ars_openapi burst=10 nodelay;
+
+        proxy_pass http://ars_openapi;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_read_timeout 120s;        # 导出 xlsx 时可能较慢
+    }
+
+    # 除数据接口外，这个域名下什么都不提供
+    location / {
+        return 404;
+    }
+}
+
+# ---------------------------------------------------------------------------
+# 2) 主界面：只监听内网地址，不发布到公网。
+#    对外一律 404，避免有人猜到这个域名就能撞登录口。
+# ---------------------------------------------------------------------------
+server {
+    listen 192.168.1.10:8443 ssl;
+    server_name _;
+
+    ssl_certificate     /etc/nginx/certs/returns.crt;
+    ssl_certificate_key /etc/nginx/certs/returns.key;
+
+    # 照片证据最大 10MB/张（config.PHOTO_MAX_MB），批量上传要留余量
+    client_max_body_size 64m;
+
+    location / {
+        proxy_pass http://ars_main;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host              $host;
+        # 下面两个头只有配了 ARS_TRUSTED_PROXIES 才会被程序采信；
+        # 没配时程序取传输层对端地址 —— 这是刻意的（防伪造白名单）。
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
