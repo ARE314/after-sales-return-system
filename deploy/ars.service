@@ -1,0 +1,68 @@
+# 售后返件登记系统 —— systemd 单元（Linux 服务器部署）
+#
+# 注释字符必须是 `#`：systemd 的解析器只认 `#`，用 `;` 会被当成**指令行**，
+# daemon-reload 时报
+#     Unknown key name '; 售后返件登记系统 ...' in section 'Unit'
+# 单元不会生效。原先这个文件整段用的是 `;`（那是 .ini 的风格，不是 systemd 的）。
+#
+# 用法（详见 deploy/README.md）：
+#   1. 把项目放到 /opt/ars，先跑一次 ./setup_env.sh 建好 /opt/ars/.venv
+#   2. sudo cp deploy/ars.service /etc/systemd/system/
+#   3. 按实际情况改 User / Group / WorkingDirectory / Environment
+#   4. sudo systemctl daemon-reload && sudo systemctl enable --now ars
+#   5. journalctl -u ars -f          查看日志
+#
+# 说明：一个单元同时拉起主界面（8000）与数据接口（8100）—— 后者是主服务里
+# 以守护线程启动的，不需要单独写一个单元。要单独重启数据接口时再拆分。
+
+[Unit]
+Description=After-sales Return Registration System
+Documentation=file:/opt/ars/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ars
+Group=ars
+WorkingDirectory=/opt/ars
+
+# ---------- 部署相关配置（都走环境变量，配置文件保持原样便于随代码更新）----------
+Environment=PYTHONUNBUFFERED=1
+# 主界面：走反向代理时绑 127.0.0.1 即可；直连公网才需要 0.0.0.0
+Environment=ARS_HOST=127.0.0.1
+Environment=ARS_PORT=8000
+Environment=ARS_PUBLIC_BASE_URL=https://returns.example.com
+# HTTPS 部署务必同时打开这两个
+Environment=ARS_COOKIE_SECURE=1
+Environment=ARS_HTTPS_ONLY=1
+Environment=ARS_TRUSTED_PROXIES=127.0.0.1
+# 数据接口（供金山文档定时任务拉取）
+Environment=ARS_OPEN_API=1
+Environment=ARS_OPEN_API_HOST=127.0.0.1
+Environment=ARS_OPEN_API_PORT=8100
+# 首个管理员账号（仅首次启动、用户表为空时创建）
+# 注意：程序**只在用户表为空时**读它，建好后这里留着也无害；
+# 想减少敏感信息暴露可以从这个文件里删掉，改由一次性 env 文件注入。
+Environment=ARS_BOOTSTRAP_USER=admin
+Environment=ARS_BOOTSTRAP_PASSWORD=ChangeMe_On_First_Login
+
+ExecStart=/opt/ars/.venv/bin/python /opt/ars/app.py
+Restart=always
+RestartSec=3
+
+# 日志：程序用 stdout，交给 journald 统一收集
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ars
+
+# ---------- 安全加固 ----------
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+# 只需要写 data/ 与 static/（静态资源版本号会被工具脚本改写）
+ReadWritePaths=/opt/ars/data /opt/ars/static
+
+[Install]
+WantedBy=multi-user.target

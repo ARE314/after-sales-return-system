@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>数据看板 · 售后返件登记系统</title>
+<link rel="stylesheet" href="/static/assets/app.css??v=20260920e">
+<style>
+  .chart-scroll { max-height: 340px; overflow-y: auto; overflow-x: hidden; padding-right: 4px; }
+  .chart-scroll::-webkit-scrollbar { width: 7px; }
+  .chart-scroll::-webkit-scrollbar-thumb { background: #cfd6de; border-radius: 4px; }
+  .chart-grid-2 { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); }
+  .chart-grid-3 { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+</style>
+</head>
+<body>
+<script src="/static/assets/lib/chart.umd.js??v=20260920e"></script>
+<script src="/static/assets/common.js??v=20260920e"></script>
+<script>
+(async () => {
+  const granularitySel = h('select', {
+    class: 'select select--sm', style: { width: '112px' },
+  }, [
+    h('option', { value: 'month' }, '按月份'),
+    h('option', { value: 'week' }, '按周'),
+    h('option', { value: 'day' }, '按日'),
+  ]);
+  granularitySel.addEventListener('change', () => load());
+
+  const content = await mountLayout('dashboard', '数据看板', '返件汇总 · 检测汇总', [
+    granularitySel,
+    h('button', { class: 'btn btn--sm', onclick: () => load() }, '刷新'),
+  ]);
+
+  let META;
+  try { META = await api('/meta'); }
+  catch (e) { content.replaceChildren(h('div', { class: 'empty' }, '加载失败：' + e.message)); return; }
+
+  /* =====================================================================
+     看板分两块，与登记模块的职责划分一致：
+       返件汇总 —— 收到货后初步能确定的维度（时间 · 来源 · 产品分布）
+       检测汇总 —— 送检后才能确定的维度（工作量 · 时效 · 归因）
+     两块各自带筛选条件、各自一套图表，切换页签时互不影响。
+     ===================================================================== */
+
+  const TABS = [
+    { key: 'return', label: '返件汇总', hint: '收到货就能确定的维度' },
+    { key: 'inspect', label: '检测汇总', hint: '送检后才能确定的维度' },
+  ];
+
+  /* 字段候选来源：
+     - fixed：锁定选项（config.FIXED_OPTIONS，经 /api/meta 下发）
+     - 其余走字段字典（历史登记值） */
+  const SCOPES = {
+    return: {
+      dateLabel: '退回时间',
+      dateField: 'return_date',
+      // 刻意不放「快递公司」「登记人」两项筛选：两者候选都是单值
+      // （顺丰速运 / 金山导入），选了等于没筛；需要时加回一行即可。
+      filters: [
+        ['product_category', '产品类别'], ['turbine_vendor', '风机厂家'],
+        ['product_model', '产品型号'], ['feedback_issue', '反馈现象'],
+        ['info_source', '快递归属'],
+        ['production_year', '生产年份'], ['project_site', '项目风场'],
+      ],
+      kpis: ov => [
+        ['返件记录', num(ov.records), '条', ''],
+        ['退回数量', num(ov.qty), '件', 'kpi--info'],
+        ['售后单数', num(ov.orders), '单', ''],
+        ['涉及型号', num(ov.models), '个', ''],
+        ['涉及厂家', num(ov.vendors), '家', ''],
+        ['本月新增', num(ov.this_month), '条', 'kpi--success'],
+      ],
+      charts: [
+        { id: 'c-trend', title: '返件趋势', hint: '按退回时间', span: 'full',
+          box: 'chart-box--h260', type: 'line', src: 'trend',
+          series: [
+            { label: '返件条数', key: 'value', color: '#185fa5', fill: true },
+            { label: '退回数量', key: 'qty', color: '#0f6e56', dash: true },
+          ] },
+        // 产品类别用横条图（有数量轴，能读出具体条数）；原先那张同数据的
+        // 饼图已随之去掉 —— 两张图讲同一件事只会占地方
+        { id: 'c-cat-top', title: '产品类别 TOP', hint: '返件条数', span: 'half',
+          type: 'bar', src: 'by_category' },
+        { id: 'c-vendor', title: '风机厂家 TOP', hint: '返件条数', span: 'half',
+          type: 'bar', src: 'by_vendor' },
+        { id: 'c-year', title: '生产年份分布', hint: '批次追溯', span: 'half',
+          type: 'bar', src: 'by_production_year' },
+        { id: 'c-infosource', title: '快递归属', hint: '来源端', span: 'half',
+          type: 'doughnut', src: 'by_info_source' },
+        // 刻意不做「快递公司」与「登记人」两块图：
+        //   快递公司 —— 10 个候选逐个看价值低，退回单号本身就能定位物流；
+        //   登记人   —— 当前基本只有一人登记，饼图恒为单色。
+        // 这两个字段本身照旧在表格、编辑弹窗与筛选条里可见可用。
+        { id: 'c-cross', title: '厂家 × 类别 交叉分析', hint: '堆叠对比',
+          span: 'full', box: 'chart-box--h300', type: 'stacked',
+          src: 'cross_vendor_category' },
+      ],
+    },
+
+    inspect: {
+      dateLabel: '检测时间',
+      dateField: 'test_date',
+      filters: [
+        ['fault_cause', '故障原因'], ['test_result', '检测结果'],
+        ['improvement', '改善措施'], ['issue_category', '问题分类'],
+        ['responsibility', '责任归属'], ['solution', '处理方案'],
+      ],
+      kpis: ov => [
+        ['已检测', num(ov.inspected), '条', 'kpi--success'],
+        ['待检测', num(ov.untested), '条', 'kpi--warning'],
+        ['检测覆盖率', num(ov.coverage, 1), '%',
+         ov.coverage >= 90 ? 'kpi--success' : 'kpi--warning'],
+        ['平均检测时长', num(ov.avg_test_days, 1), '天', 'kpi--info'],
+        [`${ov.fast_days} 天内检测`, num(ov.fast_rate, 1), '%',
+         ov.fast_rate >= 60 ? 'kpi--success' : 'kpi--warning'],
+        ['已检测未完结', num(ov.unfinished), '条', 'kpi--danger'],
+      ],
+      charts: [
+        /* ---- 工作量 ---- */
+        { id: 'c-trend', title: '检测趋势', hint: '按检测时间', span: 'full',
+          box: 'chart-box--h260', type: 'line', src: 'trend',
+          series: [{ label: '检测条数', key: 'value', color: '#0f6e56', fill: true }] },
+
+        /* ---- 谁在返检：厂家 → 产品 ---- */
+        { id: 'c-vendor', title: 'TOP 厂家', hint: '按检测条数', span: 'half',
+          type: 'bar', src: 'by_vendor' },
+        { id: 'c-vendor-products', title: '厂家 → 主要产品类别',
+          hint: '返检集中在哪几家 · 主要坏在哪类产品', span: 'full',
+          type: 'bars', src: 'vendor_products' },
+
+        /* ---- 故障构成：产品类别 × 故障原因 ----
+           原因轴不截断，用卡片右上角的「筛选」按钮控制展示哪几项 */
+        { id: 'c-cat-cause', title: '产品类别 × 故障原因',
+          hint: '各类产品都在坏什么', span: 'full', box: 'chart-box--h300',
+          type: 'stacked', src: 'cross_category_cause',
+          rightFilter: true, rightLabel: '故障原因' },
+
+        /* ---- 结论与责任 ---- */
+        { id: 'c-cause', title: '故障原因 TOP', hint: '检测结论', span: 'third',
+          type: 'bar', src: 'by_cause' },
+        { id: 'c-issuecat', title: '问题分类', hint: '归因大类', span: 'third',
+          type: 'doughnut', src: 'by_issue_category' },
+        { id: 'c-resp', title: '责任归属统计', hint: '按检测条数', span: 'third',
+          type: 'bar', src: 'by_responsibility' },
+      ],
+    },
+  };
+
+  let curScope = 'return';
+  const fState = { return: {}, inspect: {} };
+
+  const fmtPct = v => (v === undefined || v === null ? '' : v + '%');
+  const isEl = v => v && typeof v === 'object' && v.nodeType === 1;
+
+  /** 产品标签组：每款产品一个小胶囊，尾部接「其他 ×N」。 */
+  function productTags(list, others) {
+    const nodes = (list || []).map(p => h('span', { class: 'ptag' }, [
+      h('span', {}, p.label),
+      h('span', { class: 'ptag__n' }, '×' + p.value),
+    ]));
+    if (others > 0) {
+      nodes.push(h('span', { class: 'ptag ptag--dim' }, [
+        h('span', {}, '其他'),
+        h('span', { class: 'ptag__n' }, '×' + others),
+      ]));
+    }
+    return nodes.length ? h('div', { class: 'ptags' }, nodes)
+                        : h('span', { class: 'muted' }, '—');
+  }
+
+  /* 把 #RRGGBB + 透明度转成 rgba，用于折线填充色 */
+  function hexA(hex, alpha) {
+    const n = parseInt(String(hex).replace('#', ''), 16);
+    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+  }
+
+  /* ---------------- 页签 ---------------- */
+  const tabBtns = {};
+  const tabBar = h('div', { class: 'tabs' }, TABS.map(t => {
+    const b = h('button', {
+      class: 'tab', type: 'button', onclick: () => switchScope(t.key),
+    }, [
+      h('span', { class: 'tab__label' }, t.label),
+      h('span', { class: 'tab__hint' }, t.hint),
+    ]);
+    tabBtns[t.key] = b;
+    return b;
+  }));
+
+  function syncTabs() {
+    TABS.forEach(t => tabBtns[t.key].classList.toggle('is-active', t.key === curScope));
+  }
+
+  /* ---------------- 筛选条 ---------------- */
+  const filterRow = h('div', { class: 'flex flex-wrap', style: { gap: '8px' } });
+  const dateLabelEl = h('span', { class: 'small muted', style: { alignSelf: 'center' } }, '退回时间');
+  const dFrom = h('input', { class: 'input input--sm', type: 'date', style: { width: '128px' } });
+  const dTo = h('input', { class: 'input input--sm', type: 'date', style: { width: '128px' } });
+
+  [dFrom, dTo].forEach(el => el.addEventListener('change', () => {
+    const st = fState[curScope];
+    const f = SCOPES[curScope].dateField;
+    if (dFrom.value) st[f + '_from'] = dFrom.value; else delete st[f + '_from'];
+    if (dTo.value) st[f + '_to'] = dTo.value; else delete st[f + '_to'];
+    load();
+  }));
+
+  /** 取某字段的全部可选值：锁定选项优先，其余走字段字典。 */
+  async function optionsOf(field) {
+    const fixed = (META.fixed_options || {})[field];
+    if (fixed && fixed.length) return fixed.slice();
+    try {
+      const opts = await DictCache.getWithCount(field);
+      return opts.map(o => o.value);
+    } catch (e) { return []; }
+  }
+
+  async function buildFilters(scope) {
+    const cfg = SCOPES[scope];
+    dateLabelEl.textContent = cfg.dateLabel;
+    dFrom.value = ''; dTo.value = '';
+    filterRow.replaceChildren();
+    cfg.filters.forEach(([field, label]) => {
+      const sel = h('select', { class: 'select select--sm', style: { width: '138px' } },
+        [h('option', { value: '' }, label + '：全部')]);
+      sel.addEventListener('change', () => {
+        const st = fState[scope];
+        if (sel.value) st[field] = sel.value; else delete st[field];
+        if (scope === curScope) load();
+      });
+      filterRow.appendChild(sel);
+      optionsOf(field).then(values => {
+        sel.replaceChildren(
+          h('option', { value: '' }, label + '：全部'),
+          ...values.slice(0, 80).map(v => h('option', { value: v }, v)));
+      });
+    });
+    // 重置按钮
+    filterRow.appendChild(h('button', {
+      class: 'btn btn--sm btn--ghost',
+      onclick: () => {
+        const st = fState[scope];
+        Object.keys(st).forEach(k => delete st[k]);
+        dFrom.value = ''; dTo.value = '';
+        $$('select', filterRow).forEach(s => s.value = '');
+        load();
+      },
+    }, '重置'));
+  }
+
+  content.replaceChildren(
+    tabBar,
+    h('div', { class: 'card mb12' }, h('div', { class: 'card__body' }, [
+      h('div', { class: 'flex flex-wrap', style: { gap: '8px' } }, [
+        dateLabelEl, dFrom, h('span', { class: 'muted' }, '~'), dTo,
+      ]),
+      h('div', { class: 'mt8' }, filterRow),
+    ])),
+    h('div', { id: 'kpi-host' }, h('div', { class: 'empty' }, '加载中…')),
+    h('div', { id: 'charts-host', class: 'mt16' }),
+  );
+
+  /* ---------------- 图表骨架 ---------------- */
+  function chartCard(c) {
+    const boxCls = c.box || 'chart-box--h260';
+    let inner;
+    if (c.type === 'bars') {
+      // HTML 条形组：厂家 → 主要产品 这类「每行一组」的图，用画布反而
+      // 放不下长型号名，也不便逐个厂家独立成组
+      inner = h('div', { id: c.id });
+    } else if (c.type === 'table') {
+      // 表格卡片不需要画布：内容由 drawTable 直接写进容器
+      inner = h('div', { class: 'chart-box', id: c.id });
+    } else {
+      const canvas = h('canvas', { id: c.id });
+      const box = h('div', { class: `chart-box ${boxCls}` }, canvas);
+      inner = (c.type === 'bar') ? h('div', { class: 'chart-scroll' }, box) : box;
+    }
+
+    const head = [
+      h('div', { class: 'card__title' }, c.title),
+      h('div', { class: 'card__hint' }, c.hint),
+    ];
+    if (c.rightFilter) {
+      head.push(h('button', {
+        class: 'btn btn--sm btn--ghost card__act', type: 'button',
+        onclick: () => openRightFilter(c),
+      }, '筛选'));
+    }
+
+    return {
+      span: c.span,
+      node: h('div', { class: 'card' }, [
+        h('div', { class: 'card__head' }, head),
+        h('div', { class: 'card__body' }, inner),
+      ]),
+    };
+  }
+
+  function buildSkeleton(scope) {
+    const host = $('#charts-host');
+    const list = SCOPES[scope].charts;
+    const rows = [];
+    let buffer = [];
+    let bufferSpan = 'third';
+
+    list.forEach(c => {
+      const cc = chartCard(c);
+      if (c.span === 'full') {
+        if (buffer.length) { rows.push(buffer); buffer = []; }
+        rows.push([cc]);
+      } else {
+        if (buffer.length && bufferSpan !== c.span) { rows.push(buffer); buffer = []; }
+        bufferSpan = c.span;
+        buffer.push(cc);
+        const cap = c.span === 'half' ? 2 : 3;
+        if (buffer.length >= cap) { rows.push(buffer); buffer = []; }
+      }
+    });
+    if (buffer.length) rows.push(buffer);
+
+    host.replaceChildren(...rows.map(row => {
+      if (row[0].span === 'full') return h('div', { class: 'mb12' }, row[0].node);
+      return h('div', {
+        class: row[0].span === 'half' ? 'chart-grid-2 mb12' : 'chart-grid-3 mb12',
+      }, row.map(r => r.node));
+    }));
+  }
+
+  /* ---------------- 图表绘制 ---------------- */
+  function markEmpty(id, isEmpty) {
+    const cv = document.getElementById(id);
+    if (!cv) return;
+    const box = cv.parentElement;
+    const old = box.querySelector('.chart-empty');
+    if (old) old.remove();
+    box.classList.toggle('is-empty', !!isEmpty);
+    if (isEmpty) box.appendChild(h('div', { class: 'chart-empty' }, '当前筛选下暂无数据'));
+  }
+
+  function drawLine(c, d) {
+    const rows = d[c.src] || [];
+    const sets = c.series.map(s => ({
+      label: s.label,
+      data: rows.map(r => r[s.key]),
+      borderColor: s.color,
+      backgroundColor: s.fill ? hexA(s.color, .12) : 'transparent',
+      borderWidth: s.fill ? 2 : 1.6,
+      borderDash: s.dash ? [5, 4] : undefined,
+      fill: !!s.fill, tension: .3,
+      pointRadius: s.fill ? 3 : 0, pointHoverRadius: 4,
+      pointBackgroundColor: s.color,
+    }));
+    renderChart(c.id, {
+      type: 'line',
+      data: { labels: rows.map(r => r.label), datasets: sets },
+      options: baseChartOptions(),
+    });
+    markEmpty(c.id, !rows.length);
+  }
+
+  function drawCompare(c, d) {
+    const rt = d.return_trend || [], tt = d.trend || [];
+    const labels = [...new Set([...rt.map(x => x.label), ...tt.map(x => x.label)])].sort();
+    const m1 = new Map(rt.map(x => [x.label, x.value]));
+    const m2 = new Map(tt.map(x => [x.label, x.value]));
+    renderChart(c.id, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          { label: '退回条数', data: labels.map(l => m1.get(l) || 0),
+            borderColor: '#185fa5', backgroundColor: hexA('#185fa5', .12),
+            borderWidth: 2, fill: true, tension: .3, pointRadius: 3,
+            pointBackgroundColor: '#185fa5', pointHoverRadius: 5 },
+          { label: '检测条数', data: labels.map(l => m2.get(l) || 0),
+            borderColor: '#0f6e56', backgroundColor: 'transparent',
+            borderWidth: 2, borderDash: [5, 4], fill: false, tension: .3,
+            pointRadius: 3, pointBackgroundColor: '#0f6e56', pointHoverRadius: 5 },
+        ],
+      },
+      options: baseChartOptions(),
+    });
+    markEmpty(c.id, !labels.length);
+  }
+
+  function drawDoughnut(c, d) {
+    const list = (d[c.src] || []).filter(i => i.label);
+    renderChart(c.id, {
+      type: 'doughnut',
+      data: {
+        labels: list.map(i => i.label),
+        datasets: [{
+          data: list.map(i => i.value),
+          backgroundColor: CHART_COLORS.slice(0, list.length),
+          borderColor: '#fff', borderWidth: 1.5,
+        }],
+      },
+      options: baseChartOptions({
+        cutout: '58%',
+        plugins: {
+          legend: {
+            position: 'right',
+            labels: { font: { size: 11 }, boxWidth: 11, padding: 8, color: '#5b6472' },
+          },
+          tooltip: {
+            backgroundColor: '#26303d', padding: 9, cornerRadius: 6,
+            callbacks: {
+              label: ctx => {
+                const total = ctx.dataset.data.reduce((a, b) => a + b, 0);
+                const pct = total ? (ctx.parsed / total * 100).toFixed(1) : 0;
+                return ` ${ctx.label}: ${ctx.parsed} 条 (${pct}%)`;
+              },
+            },
+          },
+        },
+        scales: {},
+      }),
+    });
+    markEmpty(c.id, !list.length);
+  }
+
+  function drawBar(c, d) {
+    const list = (d[c.src] || []).filter(i => i.label);
+    const cv = document.getElementById(c.id);
+    if (!cv) return;
+    // 画布高度自适应：条目少不留白，条目多交给外层滚动
+    cv.parentElement.style.height =
+      Math.max(180, Math.min(list.length * 26 + 46, 900)) + 'px';
+    renderChart(c.id, {
+      type: 'bar',
+      data: {
+        labels: list.map(i => i.label),
+        datasets: [{
+          label: '条数', data: list.map(i => i.value),
+          backgroundColor: list.map((_, i) => CHART_COLORS[i % CHART_COLORS.length]),
+          borderRadius: 4, barThickness: 'flex', maxBarThickness: 20,
+        }],
+      },
+      options: baseChartOptions({
+        indexAxis: 'y',
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: '#26303d', padding: 9, cornerRadius: 6,
+            callbacks: { label: ctx => ` ${ctx.parsed.x} 条` },
+          },
+        },
+        scales: {
+          x: {
+            beginAtZero: true,
+            ticks: { font: { size: 11 }, color: '#5b6472', precision: 0 },
+            grid: { color: '#eef1f4' }, border: { display: false },
+          },
+          y: {
+            ticks: {
+              font: { size: 11 }, color: '#3d4653', autoSkip: false,
+              crossAlign: 'far',
+              callback: function (v) {
+                const s = String(this.getLabelForValue(v) ?? '');
+                return s.length > 16 ? s.slice(0, 15) + '…' : s;
+              },
+            },
+            grid: { display: false }, border: { color: '#e3e6ea' },
+          },
+        },
+      }),
+    });
+    markEmpty(c.id, !list.length);
+  }
+
+  function drawStacked(c, d) {
+    const cross = d[c.src] || { left: [], right: [], matrix: {} };
+    const all = cross.right || [];
+    const sel = rightSel[c.id];
+    // 颜色按**原始序号**取，不按筛选后的序号 —— 否则勾掉一项会让其余颜色整体前移，
+    // 同一个原因在筛选前后是两种颜色，读图时会认错
+    const colorOf = new Map(all.map((r, i) => [r, CHART_COLORS[i % CHART_COLORS.length]]));
+    const rights = sel ? all.filter(r => sel.has(r)) : all;
+    renderChart(c.id, {
+      type: 'bar',
+      data: {
+        labels: cross.left,
+        datasets: rights.map(r => ({
+          label: r,
+          data: cross.left.map(l => (cross.matrix[r] || {})[l] || 0),
+          backgroundColor: colorOf.get(r),
+          borderRadius: 3, maxBarThickness: 34,
+        })),
+      },
+      options: baseChartOptions({
+        plugins: {
+          legend: { labels: { font: { size: 11 }, boxWidth: 11, padding: 8, color: '#5b6472' } },
+          tooltip: { backgroundColor: '#26303d', padding: 9, cornerRadius: 6 },
+        },
+        scales: {
+          x: {
+            stacked: true,
+            ticks: {
+              font: { size: 11 }, color: '#5b6472', autoSkip: false, maxRotation: 0,
+              callback: function (v) {
+                const s = String(this.getLabelForValue(v) ?? '');
+                return s.length > 8 ? s.slice(0, 7) + '…' : s;
+              },
+            },
+            grid: { display: false }, border: { color: '#e3e6ea' },
+          },
+          y: {
+            stacked: true, beginAtZero: true,
+            ticks: { font: { size: 11 }, color: '#5b6472', precision: 0 },
+            grid: { color: '#eef1f4' }, border: { display: false },
+          },
+        },
+      }),
+    });
+    markEmpty(c.id, !cross.left.length || !rights.length);
+  }
+
+  function drawTable(c, d) {
+    const host = document.getElementById(c.id);
+    if (!host) return;
+    let body = [];
+    try { body = c.rows(d) || []; } catch (e) { body = []; }
+
+    const head = h('tr', {}, (c.head || []).map((t, j) =>
+      h('th', { class: (c.align || [])[j] === 'num' ? 'num' : '' }, t)));
+    const rows = body.length
+      ? body.map(cells => h('tr', {}, cells.map((v, j) =>
+          h('td', { class: (c.align || [])[j] === 'num' ? 'num' : '' },
+            [isEl(v) ? v : String(v === undefined || v === null ? '' : v)]))))
+      : [h('tr', {}, h('td', {
+          colspan: (c.head || []).length,
+          class: 'stat-table__empty',
+        }, '当前筛选下暂无数据'))];
+
+    host.replaceChildren(h('table', { class: 'stat-table' },
+      [h('thead', {}, head), h('tbody', {}, rows)]));
+  }
+
+  /** 单条产品行：标签 + 占比条 + 条数。 */
+  function barRow(label, value, ratio, color) {
+    return h('div', { class: 'vpb', title: `${label} ×${value}` }, [
+      h('span', { class: 'vpb__label' }, label),
+      h('span', { class: 'vpb__track' },
+        h('span', {
+          class: 'vpb__fill',
+          style: { width: (Math.max(ratio, 0) * 100).toFixed(1) + '%', background: color },
+        })),
+      h('span', { class: 'vpb__n' }, '×' + value),
+    ]);
+  }
+
+  /** HTML 条形组：每个厂家一组，组内是该厂家各产品的占比条。 */
+  function drawBars(c, d) {
+    const host = document.getElementById(c.id);
+    if (!host) return;
+    const vendors = ((d[c.src] || {}).vendors) || [];
+    if (!vendors.length) {
+      host.replaceChildren(h('div', { class: 'empty' }, '当前筛选下暂无数据'));
+      return;
+    }
+    host.replaceChildren(h('div', { class: 'vpgrid' }, vendors.map(v => {
+      const total = v.value || 1;
+      const rows = (v.items || []).map((p, i) =>
+        barRow(p.label, p.value, p.value / total,
+               CHART_COLORS[i % CHART_COLORS.length]));
+      if (v.others > 0) {
+        rows.push(barRow('其他', v.others, v.others / total, '#c3ccd6'));
+      }
+      return h('div', { class: 'vpitem' }, [
+        h('div', { class: 'vpitem__head' }, [
+          h('span', { class: 'vpitem__name' }, v.label),
+          h('span', { class: 'vpitem__n' }, `${v.value} 条 · ${v.share}%`),
+        ]),
+        h('div', {}, rows),
+      ]);
+    })));
+  }
+
+  const DRAWERS = {
+    line: drawLine, compare: drawCompare, doughnut: drawDoughnut,
+    bar: drawBar, stacked: drawStacked, bars: drawBars, table: drawTable,
+  };
+
+  /* ---------------- 右轴筛选（堆叠图的显示项） ----------------
+     故障原因有几十种，一次性全堆在图上颜色不够、图例也读不了。
+     后端不擅自归并「其他」（会把想看的项藏进聚合值），改为这里勾选。 */
+  const rightSel = {};        // chartId -> Set(选中项)；未设置 = 全部显示
+  let lastData = null;        // 最近一次接口数据，供筛选后重绘
+
+  function redraw(c) {
+    const fn = DRAWERS[c.type];
+    if (!fn || !lastData) return;
+    try { fn(c, lastData); }
+    catch (e) { console.error(`[看板] 「${c.title}」重绘失败`, e); }
+  }
+
+  function openRightFilter(c) {
+    const all = (((lastData || {})[c.src] || {}).right) || [];
+    if (!all.length) { toast('当前筛选下没有可选值', 'warn'); return; }
+    const chosen = rightSel[c.id] || new Set(all);
+
+    const count = h('span', { class: 'colpick__count' });
+    const applyBtn = h('button', { class: 'btn btn--primary' }, '应用');
+    const refresh = () => {
+      const n = items.filter(it => it.cb.checked).length;
+      count.textContent = `已选 ${n} / 共 ${all.length} 项`;
+      applyBtn.disabled = n === 0;
+      applyBtn.textContent = n === all.length ? '应用' : `应用（${n} 项）`;
+    };
+
+    const items = all.map(v => {
+      const cb = h('input', { type: 'checkbox', value: v, checked: chosen.has(v) ? 'checked' : null });
+      cb.addEventListener('change', refresh);
+      return { v, cb, node: h('label', { class: 'colpick__item' }, [cb, h('span', {}, v)]) };
+    });
+
+    const m = openModal({
+      title: c.title + ' · 显示项', narrow: true,
+      body: h('div', {}, [
+        h('div', { class: 'colpick__bar' }, [
+          h('div', { class: 'small muted' }, '选择要在图上展示的' + (c.rightLabel || '分类')),
+          h('div', { class: 'colpick__bar-right' }, [count]),
+        ]),
+        h('div', { class: 'colpick__grid' }, items.map(it => it.node)),
+      ]),
+      footer: [
+        h('button', {
+          class: 'btn',
+          onclick: () => { rightSel[c.id] = null; m.close(); redraw(c); },
+        }, '全部显示'),
+        applyBtn,
+      ],
+    });
+    applyBtn.onclick = () => {
+      const picked = new Set(items.filter(it => it.cb.checked).map(it => it.v));
+      rightSel[c.id] = picked.size === all.length ? null : picked;
+      m.close(); redraw(c);
+    };
+    refresh();
+  }
+
+  /* ---------------- 加载与渲染 ---------------- */
+  let busy = false;
+  async function load() {
+    if (busy) return;
+    busy = true;
+    const scope = curScope;
+    try {
+      const data = await api('/stats?' + qs(Object.assign(
+        { scope }, fState[scope], { granularity: granularitySel.value })));
+      if (scope !== curScope) return;          // 切页签了，丢弃过期响应
+      lastData = data;                         // 供筛选面板重绘
+      renderKpis(SCOPES[scope].kpis(data.overview || {}));
+      SCOPES[scope].charts.forEach(c => {
+        const fn = DRAWERS[c.type];
+        if (!fn) return;
+        // 逐张隔离：某张图（配置写错 / 数据异常）失败不该把后面的图一起带走。
+        // 没有这层保护时，一次异常会让整页图表停在那张之后都不渲染。
+        try { fn(c, data); }
+        catch (e) { console.error(`[看板] 「${c.title}」渲染失败`, e); }
+      });
+    } catch (e) {
+      // 看板图多，出错时只弹 toast 很难定位 —— 一并打到控制台留堆栈
+      console.error('[看板] 加载失败', e);
+      toast('加载失败：' + e.message, 'error');
+    } finally { busy = false; }
+  }
+
+  function renderKpis(items) {
+    $('#kpi-host').replaceChildren(h('div', { class: 'kpis' },
+      items.map(([label, value, unit, cls]) => h('div', { class: `kpi ${cls}` }, [
+        h('div', { class: 'kpi__label' }, label),
+        h('div', { class: 'kpi__value' }, [value, h('span', { class: 'kpi__unit' }, unit)]),
+      ]))));
+  }
+
+  async function switchScope(scope) {
+    if (scope === curScope) return;
+    curScope = scope;
+    syncTabs();
+    buildSkeleton(scope);
+    await buildFilters(scope);
+    $('#kpi-host').replaceChildren(h('div', { class: 'empty' }, '加载中…'));
+    load();
+  }
+
+  /* ---------------- 启动段 ----------------
+     立即执行一律放文件末尾：页面脚本是单个 IIFE，若在中部调用依赖后置
+     let/const 的函数会触发 TDZ，整个脚本中断。见项目约定。 */
+  syncTabs();
+  buildSkeleton(curScope);
+  await buildFilters(curScope);
+  load();
+})();
+</script>
+</body>
+</html>

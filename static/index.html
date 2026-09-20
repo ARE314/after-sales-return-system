@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>工作台 · 售后返件登记系统</title>
+<link rel="stylesheet" href="/static/assets/app.css??v=20260920e">
+</head>
+<body>
+<script src="/static/assets/common.js??v=20260920e"></script>
+<script>
+(async () => {
+  const content = await mountLayout('index', '工作台', '售后返件登记系统 · 总览与快捷入口', [
+    h('button', { class: 'btn btn--sm', onclick: () => refresh() }, '刷新'),
+    h('a', { class: 'btn btn--primary btn--sm', href: '/scan.html' }, '＋ 新登记'),
+  ]);
+
+  async function refresh() {
+    content.replaceChildren(h('div', { class: 'empty' }, '加载中…'));
+    let stats, health, recent;
+    try {
+      [stats, health, recent] = await Promise.all([
+        api('/stats'), api('/health'), api('/returns?page_size=8'),
+      ]);
+    } catch (e) {
+      content.replaceChildren(h('div', { class: 'empty' }, '加载失败：' + e.message));
+      return;
+    }
+
+    const ov = stats.overview;
+    const kpis = [
+      { label: '返件记录总数', value: num(ov.records), unit: '条', cls: '' },
+      { label: '退回产品总数', value: num(ov.qty), unit: '件', cls: 'kpi--info' },
+      { label: '涉及售后单', value: num(ov.orders), unit: '单', cls: '' },
+      { label: '待检测', value: num(ov.untested), unit: '条', cls: 'kpi--warning' },
+      { label: '未完结', value: num(ov.unfinished), unit: '条', cls: 'kpi--danger' },
+      { label: '本月新增', value: num(ov.this_month), unit: '条', cls: 'kpi--success' },
+      { label: '平均检测时长', value: num(ov.avg_test_days, 1), unit: '天', cls: 'kpi--info' },
+      { label: '待同步', value: num(ov.pending_sync), unit: '条', cls: 'kpi--warning' },
+    ];
+
+    const kpiGrid = h('div', { class: 'kpis mb16' },
+      kpis.map(k => h('div', { class: `kpi ${k.cls}` }, [
+        h('div', { class: 'kpi__label' }, k.label),
+        h('div', { class: 'kpi__value' }, [k.value, h('span', { class: 'kpi__unit' }, k.unit)]),
+      ])));
+
+    // 最近登记
+    const cols = [
+      ['detail_key', '明细唯一键'], ['return_no', '退回单号'],
+      ['turbine_vendor', '风机厂家'], ['product_model', '产品型号'],
+      ['product_category', '产品类别'], ['return_date', '退回时间'],
+      ['completion', '完结'], ['registrar', '登记人'], ['registered_at', '登记时间'],
+    ];
+    const table = h('table', { class: 'table table--compact' }, [
+      h('thead', {}, h('tr', {}, cols.map(c => h('th', {}, c[1])))),
+      h('tbody', {}, recent.rows.length ? recent.rows.map(r =>
+        h('tr', {}, cols.map(c => {
+          if (c[0] === 'detail_key') {
+            return h('td', {}, h('span', {
+              class: 'link-cell', onclick: () => location.href = '/query.html?kw=' + encodeURIComponent(r.detail_key),
+            }, r.detail_key || ''));
+          }
+          if (c[0] === 'completion') return h('td', {}, completionTag(r.completion));
+          if (c[0] === 'registered_at') return h('td', { class: 'muted' }, fmtDateTime(r.registered_at));
+          return h('td', {}, r[c[0]] ?? '');
+        }))
+      ) : [h('tr', {}, h('td', { colspan: cols.length }, h('div', { class: 'empty' }, [
+        h('div', { class: 'empty__icon' }, '○'),
+        '暂无登记记录，从右上角「＋ 新登记」开始',
+      ])))]),
+    ]);
+
+    // 系统信息
+    const infoRows = [
+      ['数据库文件', health.db.db_path],
+      ['记录总数', num(health.db.total) + ' 条'],
+      ['匹配数据库', num(health.db.item_master) + ' 条物料'],
+      ['型号字典', num(health.db.model_dict) + ' 个型号'],
+      ['服务时间', health.time],
+      ['运行模式', '局域网本地服务（数据全部存本地）'],
+    ];
+    const infoCard = h('div', { class: 'card' }, [
+      h('div', { class: 'card__head' }, h('div', { class: 'card__title' }, '系统信息')),
+      h('div', { class: 'card__body' }, h('table', { class: 'table table--compact' },
+        h('tbody', {}, infoRows.map(([k, v]) => h('tr', {}, [
+          h('td', { style: { width: '110px', color: '#5b6472' } }, k),
+          h('td', { class: 'mono cell-wrap', style: { whiteSpace: 'normal' } }, v),
+        ]))))),
+    ]);
+
+    const quickCard = h('div', { class: 'card' }, [
+      h('div', { class: 'card__head' }, h('div', { class: 'card__title' }, '快捷入口')),
+      h('div', { class: 'card__body' }, h('div', { style: { display: 'grid', gap: '8px' } }, [
+        quickLink('/scan.html', '退回登记', '扫码枪 / 手动 / 摄像头，实时匹配回填'),
+        quickLink('/inspect.html', '检测登记', '待检清单 + 检测结果与归因录入'),
+        quickLink('/query.html', '明细查询', '多条件筛选、关键词检索、导出 Excel'),
+        quickLink('/dashboard.html', '数据看板', 'KPI 与多维图表联动分析'),
+        quickLink('/items.html', '匹配数据库', '物料主档维护，扫码回填的依据'),
+        quickLink('/sync.html', '同步设置', '待同步队列与云端推送状态'),
+      ])),
+    ]);
+
+    content.replaceChildren(
+      kpiGrid,
+      h('div', { class: 'grid', style: { gridTemplateColumns: 'minmax(0, 1.55fr) minmax(0, 1fr)' } }, [
+        h('div', { class: 'card' }, [
+          h('div', { class: 'card__head' }, [
+            h('div', { class: 'card__title' }, '最近登记'),
+            h('div', { class: 'card__tools' },
+              h('a', { class: 'btn btn--sm btn--ghost', href: '/query.html' }, '查看全部 →')),
+          ]),
+          h('div', { class: 'table-wrap', style: { maxHeight: '380px' } }, table),
+        ]),
+        h('div', {}, [
+          quickCard,
+          h('div', { class: 'mt12' }, infoCard),
+        ]),
+      ]),
+    );
+  }
+
+  function quickLink(href, title, desc) {
+    return h('a', {
+      href,
+      style: {
+        display: 'block', padding: '10px 12px', border: '1px solid #e3e6ea',
+        borderRadius: '8px', background: '#fafbfc',
+      },
+      onmouseenter: e => { e.currentTarget.style.borderColor = '#185fa5'; e.currentTarget.style.background = '#e6f1fb'; },
+      onmouseleave: e => { e.currentTarget.style.borderColor = '#e3e6ea'; e.currentTarget.style.background = '#fafbfc'; },
+    }, [
+      h('div', { style: { fontWeight: '600', fontSize: '13px', color: '#1f2328' } }, title),
+      h('div', { class: 'small muted' }, desc),
+    ]);
+  }
+
+  refresh();
+})();
+</script>
+</body>
+</html>

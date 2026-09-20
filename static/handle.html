@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>处理登记 · 售后返件登记系统</title>
+<link rel="stylesheet" href="/static/assets/app.css??v=20260920e">
+</head>
+<body>
+<script src="/static/assets/common.js??v=20260920e"></script>
+<script>
+(async () => {
+  const pendingTag = h('span', { class: 'tag' }, '待处理 —');
+  const content = await mountLayout('handle', '处理登记',
+    '左侧按售后单聚合（一单一行），右侧选择明细行后登记该行的处理情况',
+    [pendingTag]);
+
+  /* ================= 元数据 ================= */
+  let META;
+  try {
+    META = await api('/meta');
+  } catch (e) {
+    content.replaceChildren(h('div', { class: 'empty' }, '加载失败：' + e.message));
+    return;
+  }
+
+  const HANDLE_GROUPS = META.handle_groups || [];
+  const FIXED = META.fixed_options || {};
+  const FIELD_MAP = {};
+  HANDLE_GROUPS.forEach(g => g.fields.forEach(f => { FIELD_MAP[f.name] = f; }));
+
+  const DICT_FIELDS = [];
+  HANDLE_GROUPS.forEach(g => g.fields.forEach(f => {
+    if (f.type === 'search-dict') DICT_FIELDS.push(f.name);
+  }));
+  let DICT = {};
+  try { DICT = await loadDictMap(DICT_FIELDS); } catch { DICT = {}; }
+
+  /* ================= 状态 =================
+     orderRows    左侧清单：一行 = 一个售后单（后端按 order_no 聚合）
+     currentOrder 当前选中的售后单
+     lines        当前售后单下的明细行（一行 = 一只产品）
+     current      当前选中的明细（录入目标） */
+  let orderRows = [];
+  let currentOrder = null;
+  let lines = [];
+  let current = null;
+  let ctl = {};           // 当前表单控件
+  let onlyPending = true;
+  let keyword = '';
+  let page = 1;
+  let total = 0;
+  const PAGE_SIZE = 50;
+
+  function buildQuery(params) {
+    const sp = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v === null || v === undefined || v === '') return;
+      sp.append(k, v === true ? '1' : v);
+    });
+    return sp.toString();
+  }
+
+  /* ================= 控件工厂 ================= */
+  function wrapControl(el) {
+    if (!el.getValue) {
+      el.getValue = () => (el.value || '').trim();
+      el.setValue = v => { el.value = v ?? ''; };
+    }
+    return el;
+  }
+
+  function buildControl(f) {
+    const val = (current && current[f.name]) || '';
+
+    if (f.type === 'search-dict') {
+      const cb = combobox({
+        name: f.name,
+        options: DICT[f.name] || [],
+        allowNew: true,
+        value: val,
+        placeholder: '可选择或输入新值',
+      });
+      cb.input.dataset.field = f.name;
+      return cb;
+    }
+
+    if (f.type === 'select-fixed') {
+      // no_empty 的字段（空值即默认值）不给「请选择」空选项，直接落到默认值
+      const sel = fixedSelect({
+        name: f.name,
+        options: FIXED[f.name] || [],
+        value: val || (f.no_empty ? (f.default || '') : ''),
+        placeholder: f.no_empty ? null : '请选择',
+      });
+      sel.dataset.field = f.name;
+      return sel;
+    }
+
+    if (f.type === 'photos') {
+      // 照片证据：缩略图网格 + 上传（上传即刻落库，无需等保存）
+      return photoGrid({
+        name: f.name,
+        detailKey: (current && current.detail_key) || '',
+        orderNo: (current && current.order_no) || '',
+        value: val,
+        limits: META.photo_limits || {},
+      });
+    }
+
+    if (f.type === 'textarea') {
+      const ta = h('textarea', {
+        class: 'textarea', dataset: { field: f.name },
+        style: { minHeight: '68px' },
+      });
+      ta.value = val;
+      return wrapControl(ta);
+    }
+
+    const el = h('input', {
+      class: 'input',
+      type: f.type === 'date' ? 'date' : 'text',
+      placeholder: f.placeholder || '',
+      dataset: { field: f.name },
+    });
+    el.value = val;
+    // 锁定字段（检测时间）：空值时给默认值——有值就用原值，不覆盖历史记录
+    if (!el.value && f.default === 'today') el.value = today();
+    else if (!el.value && f.default !== undefined) el.value = f.default;
+    // readonly：仅在「新建登记」场景锁定（如检测时间）；
+    // auto：系统派生字段（如完结状况），任何场景都只读
+    if (f.readonly || f.auto) {
+      el.readOnly = true;
+      el.classList.add('input--locked');
+      el.title = f.auto
+        ? '由检测字段自动判定，不可手工修改'
+        : '锁定为登记当天，如需修正请到「明细查询」页编辑';
+    }
+    return wrapControl(el);
+  }
+
+  /* ================= 扫码定位条 ================= */
+  const scanInput = h('input', {
+    class: 'input', autocomplete: 'off',
+    placeholder: '扫描或输入：产品编号 / 料号 / 退回单号 / 售后单号  →  定位到所属售后单',
+  });
+  const scanState = h('div', {
+    class: 'small muted', style: { marginTop: '8px', minHeight: '17px' },
+  }, '等待输入…');
+
+  function setScanState(text, color) {
+    scanState.textContent = text;
+    scanState.style.color = color || '';
+  }
+
+  const scanCard = h('div', { class: 'card mb16' }, [
+    h('div', { class: 'card__body' }, [
+      h('div', { class: 'inspect-scanbar' }, [
+        scanInput,
+        h('button', { class: 'btn btn--primary', onclick: () => locate(scanInput.value.trim()) },
+          '定位'),
+      ]),
+      scanState,
+    ]),
+  ]);
+
+  /* ================= 左侧：按售后单聚合的清单 ================= */
+  const listHost = h('div', { class: 'inspect-scroll' });
+  const listInfo = h('div', { class: 'card__hint' }, '');
+
+  const pendingToggle = h('input', { type: 'checkbox' });
+  pendingToggle.checked = true;
+  pendingToggle.addEventListener('change', () => {
+    onlyPending = pendingToggle.checked;
+    page = 1;
+    loadList();
+  });
+
+  const kwInput = h('input', {
+    class: 'input', style: { width: '180px' }, placeholder: '关键词…',
+  });
+  let kwTimer = null;
+  kwInput.addEventListener('input', () => {
+    clearTimeout(kwTimer);
+    kwTimer = setTimeout(() => {
+      keyword = kwInput.value.trim();
+      page = 1;
+      loadList();
+    }, 320);
+  });
+
+  const pagerBox = h('div', { class: 'pager' });
+
+  const listCard = h('div', { class: 'card' }, [
+    h('div', { class: 'card__head' }, [
+      h('div', { class: 'card__title' }, '待处理清单'),
+      listInfo,
+    ]),
+    h('div', { class: 'card__body' }, [
+      h('div', { class: 'inspect-toolbar' }, [
+        h('label', {
+          class: 'small',
+          style: { display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' },
+        }, [pendingToggle, '仅看未处理']),
+        kwInput,
+        h('button', { class: 'btn btn--sm', onclick: () => loadList() }, '刷新'),
+        h('div', { class: 'inspect-toolbar__spacer' }),
+        pagerBox,
+      ]),
+      listHost,
+    ]),
+  ]);
+
+  /* ================= 右侧：整单信息 + 明细行 + 录入 ================= */
+  const panelHost = h('div', {});
+  const panelCard = h('div', { class: 'card inspect-panel' }, [
+    h('div', { class: 'card__head' }, [
+      h('div', { class: 'card__title' }, '处理录入'),
+      h('div', { class: 'card__hint' }, '先选明细行，再登记该行的处理情况'),
+    ]),
+    h('div', { class: 'card__body' }, panelHost),
+  ]);
+
+  content.replaceChildren(
+    scanCard,
+    h('div', { class: 'inspect-split' }, [listCard, panelCard]),
+  );
+
+  /* ================= 状态判定 ================= */
+  function lineStatus(ln) {
+    // 「已处理」必须精确比较 —— erp_handled 现在是两值锁定项，
+    // 且后端把空值统一归一成「待处理」。写成 truthy 判断的话
+    // 「待处理」也是真值，所有行都会被算成已处理（清单直接变空）。
+    const handled = (ln.erp_handled || '') === '已处理';
+    const tested = !!(ln.test_date || '').trim();
+    if (handled) return ['已处理', 'tag--success'];
+    if (!tested) return ['未检测', ''];      // 还没检测，谈不上处理
+    return ['待处理', 'tag--warning'];
+  }
+
+  const isLineDone = ln => (ln.erp_handled || '') === '已处理';
+
+  /* ================= 左侧清单渲染 ================= */
+  async function loadList() {
+    const params = { page, page_size: PAGE_SIZE };
+    if (onlyPending) params.pending = 1;
+    if (keyword) params.keyword = keyword;
+
+    listHost.replaceChildren(h('div', { class: 'empty' }, '加载中…'));
+    let res;
+    try {
+      res = await api('/handle/orders?' + buildQuery(params));
+    } catch (e) {
+      listHost.replaceChildren(h('div', { class: 'empty' }, '加载失败：' + e.message));
+      return;
+    }
+    orderRows = res.rows || [];
+    total = res.total || 0;
+    renderList();
+    renderPager();
+    renderTags();
+  }
+
+  function renderTags() {
+    pendingTag.textContent = onlyPending ? `待处理 ${total} 单` : `共 ${total} 单`;
+    pendingTag.className = 'tag ' + (onlyPending && total ? 'tag--warning' : '');
+    listInfo.textContent = onlyPending
+      ? `按售后单聚合，仅显示还有明细未处理的单，共 ${total} 单`
+      : `按售后单聚合，显示全部，共 ${total} 单`;
+  }
+
+  function orderStatusTag(r) {
+    const map = {
+      done: ['已处理', 'tag--success'],
+      testing: ['部分处理', 'tag--brand'],
+      untested: ['待处理', 'tag--warning'],
+    };
+    return map[r.status_key] || map.untested;
+  }
+
+  function renderList() {
+    if (!orderRows.length) {
+      listHost.replaceChildren(h('div', { class: 'empty' },
+        onlyPending ? '没有待处理的售后单' : '没有匹配的售后单'));
+      return;
+    }
+    const cols = ['售后单号', '退回单号', '厂家 / 风场', '明细', '状态', '登记时间'];
+    const thead = h('thead', {}, h('tr', {}, cols.map(c => h('th', {}, c))));
+    const tbody = h('tbody', {}, orderRows.map(r => {
+      const [text, cls] = orderStatusTag(r);
+      const active = currentOrder && currentOrder.order_no === r.order_no;
+      const place = [r.turbine_vendor || '—'];
+      if (r.project_site) place.push(h('span', { class: 'muted' }, ' / ' + r.project_site));
+      const progress = [`${r.lines} 行`];
+      if (r.untested) {
+        progress.push(h('span', { class: 'muted' }, ` · ${r.unhandled} 未处理`));
+      }
+      return h('tr', {
+        class: active ? 'is-active' : '',
+        onclick: () => selectOrder(r.order_no),
+      }, [
+        h('td', { class: 'mono' }, r.order_no || '—'),
+        h('td', { class: 'mono' }, r.return_no || '—'),
+        h('td', {}, place),
+        h('td', {}, progress),
+        h('td', {}, h('span', { class: 'tag ' + cls }, text)),
+        h('td', { class: 'muted' }, fmtDateTime(r.registered_at)),
+      ]);
+    }));
+    listHost.replaceChildren(h('table', { class: 'inspect-table' }, [thead, tbody]));
+  }
+
+  function renderPager() {
+    const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    if (pages <= 1) {
+      pagerBox.replaceChildren();
+      return;
+    }
+    pagerBox.replaceChildren(
+      h('button', {
+        class: 'btn btn--sm', disabled: page <= 1 ? true : null,
+        onclick: () => { page = Math.max(1, page - 1); loadList(); },
+      }, '上一页'),
+      h('span', { class: 'small muted' }, `${page} / ${pages}`),
+      h('button', {
+        class: 'btn btn--sm', disabled: page >= pages ? true : null,
+        onclick: () => { page = Math.min(pages, page + 1); loadList(); },
+      }, '下一页'),
+    );
+  }
+
+  /* ================= 选中：售后单 → 明细行 ================= */
+  async function selectOrder(orderNo) {
+    if (!orderNo) return;
+    currentOrder = orderRows.find(r => r.order_no === orderNo)
+      || { order_no: orderNo };
+    renderList();
+
+    await loadLines(orderNo);
+    // 默认落在第一条还没完结的明细上，全部完结则取第一条
+    const target = lines.find(l => !isLineDone(l)) || lines[0];
+    await selectLine(target ? target.detail_key : null);
+  }
+
+  async function loadLines(orderNo) {
+    try {
+      const res = await api('/returns?' + buildQuery({
+        order_no: orderNo, page_size: 200,
+        sort_by: 'line_no', sort_dir: 'asc',
+      }));
+      lines = res.rows || [];
+    } catch (e) {
+      lines = [];
+      toast('读取明细失败：' + e.message, 'error');
+    }
+  }
+
+  async function selectLine(detailKey) {
+    if (!detailKey) {
+      current = null;
+      renderPanel();
+      return;
+    }
+    let rec = lines.find(l => l.detail_key === detailKey);
+    if (!rec) {
+      try {
+        rec = await api('/returns/' + encodeURIComponent(detailKey));
+      } catch (e) {
+        toast('读取记录失败：' + e.message, 'error');
+        return;
+      }
+    }
+    current = rec;
+    renderPanel();
+  }
+
+  function metaKV(label, value) {
+    return h('div', {}, [
+      h('span', { class: 'muted' }, label + '：'),
+      h('b', {}, value || '—'),
+    ]);
+  }
+
+  /* ================= 右侧面板渲染 ================= */
+  function renderPanel() {
+    ctl = {};
+
+    if (!currentOrder) {
+      panelHost.replaceChildren(h('div', { class: 'inspect-panel__empty' }, [
+        h('div', {}, '从左侧选择一个售后单'),
+        h('div', {}, '或在上方扫码框扫描产品条码直接定位'),
+      ]));
+      return;
+    }
+
+    // 1) 整单信息（只读）
+    const meta = h('div', { class: 'inspect-panel__meta' }, [
+      metaKV('售后单号', currentOrder.order_no),
+      metaKV('退回单号', currentOrder.return_no),
+      metaKV('快递公司', currentOrder.carrier),
+      metaKV('风机厂家', currentOrder.turbine_vendor),
+      metaKV('项目风场', currentOrder.project_site),
+      metaKV('退回时间', currentOrder.return_date),
+      metaKV('登记时间', fmtDateTime(currentOrder.registered_at)),
+    ]);
+
+    // 2) 该单下的明细行（点选切换录入目标）
+    const lineBox = h('div', { class: 'inspect-lines' }, lines.map((ln, i) => {
+      const [text, cls] = lineStatus(ln);
+      const active = current && current.detail_key === ln.detail_key;
+      return h('div', {
+        class: 'inspect-line' + (active ? ' is-active' : ''),
+        title: ln.detail_key,
+        onclick: ev => { ev.stopPropagation(); selectLine(ln.detail_key); },
+      }, [
+        h('span', { class: 'inspect-line__no' }, String(i + 1)),
+        h('span', { class: 'inspect-line__code mono' }, ln.product_code || '—'),
+        h('span', { class: 'inspect-line__model' }, ln.product_model || ln.material_no || '—'),
+        h('span', { class: 'inspect-line__name' }, ln.product_name || ''),
+        h('span', { class: 'inspect-line__status' }, h('span', { class: 'tag ' + cls }, text)),
+      ]);
+    }));
+    const lineHead = h('div', { class: 'inspect-lines__head' }, [
+      h('span', {}, `本单明细 ${lines.length} 行`),
+      h('span', { class: 'muted' }, '点选任一行后登记其处理情况'),
+    ]);
+
+    if (!current) {
+      panelHost.replaceChildren(meta, lineHead, lineBox,
+        h('div', { class: 'inspect-panel__empty' }, '请选择一行明细'));
+      return;
+    }
+
+    // 3) 当前明细的录入表单
+    const [curText] = lineStatus(current);
+    const curHead = h('div', { class: 'inspect-lines__head' }, [
+      h('span', {}, ['正在登记：', h('b', { class: 'mono' }, current.detail_key)]),
+      h('span', { class: 'muted' }, [
+        current.product_code ? `产品编号 ${current.product_code}` : '',
+        current.product_model ? ` · 型号 ${current.product_model}` : '',
+        ` · ${curText}`,
+      ]),
+    ]);
+
+    const secs = HANDLE_GROUPS.map(g => {
+      const grid = h('div', { class: 'inspect-form-grid' }, g.fields.map(f => {
+        const c = buildControl(f);
+        ctl[f.name] = c;
+        return h('div', {
+          class: 'field' + (f.type === 'textarea' ? ' field--wide' : ''),
+        }, [
+          h('label', { class: 'field__label' }, f.label),
+          c,
+        ]);
+      }));
+      return section(g.title, null, grid, false);
+    });
+
+    // 3) 检测结论（只读）—— 处理时要看到这一行为什么坏、归谁，
+    //    否则只能盲填「已处理」
+    const curInfo = h('div', { class: 'inspect-panel__meta' }, [
+      metaKV('产品编号', current.product_code),
+      metaKV('料号', current.material_no),
+      metaKV('产品型号', current.product_model),
+      metaKV('品名', current.product_name),
+      metaKV('检测时间', current.test_date),
+      metaKV('故障原因', current.fault_cause),
+      metaKV('问题分类', current.issue_category),
+      metaKV('责任归属', current.responsibility),
+      metaKV('完结状况', current.completion),
+    ]);
+
+    const idx = lines.findIndex(l => l.detail_key === current.detail_key);
+    const actions = h('div', { class: 'inspect-panel__actions' }, [
+      h('button', { class: 'btn btn--primary', onclick: save }, '保存该行处理情况'),
+      h('button', {
+        class: 'btn',
+        onclick: () => selectLine(current.detail_key),
+      }, '重置'),
+      h('button', {
+        class: 'btn', disabled: idx < 0 || idx >= lines.length - 1 ? true : null,
+        onclick: () => {
+          const next = lines[idx + 1];
+          if (next) selectLine(next.detail_key);
+        },
+      }, '下一行 →'),
+      h('div', { class: 'inspect-toolbar__spacer' }),
+      h('span', { class: 'small muted' },
+        idx >= 0 ? `第 ${idx + 1} / ${lines.length} 行 · 本单全部处理完自动移出清单` : ''),
+    ]);
+
+    panelHost.replaceChildren(meta, lineHead, lineBox, curHead, curInfo,
+                              ...secs, actions);
+  }
+
+  /* ================= 保存（按明细行） ================= */
+  async function save() {
+    if (!current) return;
+    const payload = {};
+    Object.entries(ctl).forEach(([name, c]) => {
+      payload[name] = c.getValue ? c.getValue() : '';
+    });
+
+    if (!String(payload.erp_handled || '').trim()) {
+      toast('请先选择「ERP处理」状态', 'warn');
+      return;
+    }
+    if (!['已处理', '待处理'].includes(String(payload.erp_handled).trim())) {
+      toast('「ERP处理」只能是「已处理」或「待处理」', 'warn');
+      return;
+    }
+
+    const key = current.detail_key;
+    const orderNo = current.order_no || (currentOrder && currentOrder.order_no);
+    try {
+      await api('/returns/' + encodeURIComponent(key), { method: 'PUT', body: payload });
+    } catch (e) {
+      toast('保存失败：' + e.message, 'error');
+      return;
+    }
+
+    DictCache.invalidate();
+    try { DICT = await loadDictMap(DICT_FIELDS); } catch { /* 候选刷新失败不影响保存 */ }
+
+    // 刷新明细与整单状态：该单可能因全部完结而移出待检清单
+    await loadLines(orderNo);
+    const before = orderRows.find(r => r.order_no === orderNo);
+    await loadList();
+
+    const stillThere = lines.some(l => l.detail_key === key);
+    if (stillThere) {
+      await selectLine(key);
+    } else {
+      const next = lines.find(l => !isLineDone(l)) || lines[0];
+      await selectLine(next ? next.detail_key : null);
+    }
+
+    const after = orderRows.find(r => r.order_no === orderNo);
+    if (after) {
+      toast(`已保存 ${currentOrder.order_no} 第 ${(lines.findIndex(l => l.detail_key === key) + 1) || '?'} 行`
+        + `（本单 ${after.done}/${after.lines} 行已完结）`, 'success');
+    } else if (before && onlyPending) {
+      toast(`已保存 ${key}　本单已全部完结，已移出待检清单`, 'success');
+      setScanState(`✓ ${orderNo} 已全部完结，已移出待检清单`, 'var(--success)');
+      currentOrder = null;
+      lines = [];
+      current = null;
+      renderPanel();
+    } else {
+      toast(`已保存 ${key}`, 'success');
+    }
+  }
+
+  /* ================= 扫码定位 ================= */
+  async function locate(code) {
+    code = (code || '').trim();
+    if (!code) {
+      setScanState('请输入或扫描条码', 'var(--warning)');
+      return;
+    }
+    setScanState('查找中…');
+
+    // 扫到售后单号：直接定位该单
+    const asOrder = orderRows.find(r => r.order_no === code);
+    if (asOrder) {
+      await selectOrder(code);
+      scanInput.value = '';
+      setScanState(`✓ 已定位到售后单 ${code}`, 'var(--success)');
+      return;
+    }
+
+    // 其余条码：先在后端找到对应明细，再定位到它所属的售后单
+    let row = null;
+    try {
+      const res = await api('/returns?' + buildQuery({ keyword: code, page_size: 5 }));
+      const rows = res.rows || [];
+      if (!rows.length) {
+        setScanState(`未找到与「${code}」匹配的记录`, 'var(--warning)');
+        return;
+      }
+      row = rows[0];
+    } catch (e) {
+      setScanState('查找失败：' + e.message, 'var(--danger)');
+      return;
+    }
+
+    if (!orderRows.some(r => r.order_no === row.order_no)) {
+      // 该单不在当前清单（可能已完结）—— 仍按单号定位，并说明情况
+      currentOrder = {
+        order_no: row.order_no, return_no: row.return_no, carrier: row.carrier,
+        turbine_vendor: row.turbine_vendor, project_site: row.project_site,
+        return_date: row.return_date, registered_at: row.registered_at,
+      };
+      renderList();
+      await loadLines(row.order_no);
+      await selectLine(row.detail_key);
+      scanInput.value = '';
+      setScanState(`✓ 已定位到 ${row.detail_key}`
+        + `　·　该单不在当前清单（可能已全部完结）`, 'var(--success)');
+      return;
+    }
+
+    await selectOrder(row.order_no);
+    await selectLine(row.detail_key);
+    scanInput.value = '';
+    setScanState(`✓ 已定位到售后单 ${row.order_no} 的第 ${row.line_no} 行`
+      + `（${row.detail_key}）`, 'var(--success)');
+  }
+
+  /* ================= 启动 ================= */
+  attachInputScanner(scanInput, { onCode: code => locate(code) });
+
+  document.addEventListener('click', e => {
+    const tag = (e.target.tagName || '').toUpperCase();
+    if (['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'A', 'OPTION', 'LABEL'].includes(tag)) return;
+    if (e.target.closest && (e.target.closest('.cb')
+        || e.target.closest('.inspect-table')
+        || e.target.closest('.inspect-line'))) return;
+    scanInput.focus();
+  });
+
+  await loadList();
+  renderPanel();
+  scanInput.focus();
+})();
+</script>
+</body>
+</html>

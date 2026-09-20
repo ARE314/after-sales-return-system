@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登录 · 售后返件登记系统</title>
+<link rel="stylesheet" href="/static/assets/app.css??v=20260920e">
+</head>
+<body class="login-body">
+<script src="/static/assets/common.js??v=20260920e"></script>
+<script>
+/* 登录页是唯一不进主布局的页面：它需要在未登录状态下就能打开，
+   所以不调 mountLayout（那会去拉身份、渲染侧栏，形成循环）。
+   验证码/二次验证这类扩展点留在这里加。 */
+(async () => {
+  const params = new URLSearchParams(location.search);
+  const next = params.get('next') || '/';
+  // 只允许站内相对路径，避免被构造成 ?next=https://evil 做跳转钓鱼
+  const safeNext = (next.startsWith('/') && !next.startsWith('//')) ? next : '/';
+
+  const card = h('div', { class: 'login-card' });
+  // 页脚状态行必须是**本作用域的变量**：写成 renderLogin 里的局部变量再在下面引用，
+  // 会落到浏览器内置的 window.status（一个字符串），
+  // 报 "status.replaceChildren is not a function" —— 这个名字不能用裸标识符。
+  const status = h('div', { class: 'login-foot' }, '正在连接服务…');
+  document.body.replaceChildren(h('div', { class: 'login-wrap' }, card));
+
+  // 已登录过就直接放行，不用再登一次
+  try {
+    const me = await api('/auth/me');
+    if (me.authenticated && !me.user.must_change_pwd) {
+      location.replace(safeNext);
+      return;
+    }
+    if (!me.auth_enabled) {
+      // 登录验证被关掉时不该卡在登录页
+      location.replace(safeNext);
+      return;
+    }
+  } catch { /* 探测失败就当未登录，正常走表单 */ }
+
+  renderLogin();
+
+  function brand() {
+    return h('div', { class: 'login-brand' }, [
+      h('div', { class: 'login-brand__logo' }, '返'),
+      h('div', {}, [
+        h('div', { class: 'login-brand__title' }, '售后返件登记系统'),
+        h('div', { class: 'login-brand__sub' }, 'After-sales Return System'),
+      ]),
+    ]);
+  }
+
+  function renderLogin() {
+    const userI = h('input', {
+      class: 'input', type: 'text', autocomplete: 'username',
+      placeholder: '请输入账号', autofocus: true });
+    const pwdI = h('input', {
+      class: 'input', type: 'password', autocomplete: 'current-password',
+      placeholder: '请输入密码' });
+    const err = h('div', { class: 'form-error hidden' });
+    const btn = h('button', { class: 'btn btn--primary btn--lg btn--block' }, '登 录');
+
+    const form = h('form', {
+      class: 'login-form',
+      onsubmit: e => { e.preventDefault(); submit(); },
+    }, [
+      err,
+      h('div', { class: 'field' }, [
+        h('label', { class: 'field__label' }, '账号'), userI]),
+      h('div', { class: 'field' }, [
+        h('label', { class: 'field__label' }, '密码'), pwdI]),
+      btn,
+    ]);
+
+    card.replaceChildren(
+      brand(),
+      h('div', { class: 'card login-card__box' }, [
+        h('div', { class: 'card__head' }, [
+          h('div', { class: 'card__title' }, '登录'),
+          h('div', { class: 'card__hint' }, '请使用管理员分配的账号'),
+        ]),
+        h('div', { class: 'card__body' }, form),
+      ]),
+      status,
+    );
+    userI.focus();
+
+    const fail = msg => { err.textContent = msg; err.classList.remove('hidden'); };
+
+    async function submit() {
+      err.classList.add('hidden');
+      if (!userI.value.trim()) return fail('请输入账号');
+      if (!pwdI.value) return fail('请输入密码');
+      btn.disabled = true;
+      btn.textContent = '登录中…';
+      try {
+        const r = await api('/auth/login', { method: 'POST', body: {
+          username: userI.value.trim(), password: pwdI.value } });
+        if (r.must_change_pwd) {
+          // 首次登录必须改密：把刚输入的密码作为原密码带上，免得再敲一遍
+          renderChangePwd(r.user, pwdI.value);
+          return;
+        }
+        location.replace(safeNext);
+      } catch (e) {
+        fail(e.message || '登录失败');
+        btn.disabled = false;
+        btn.textContent = '登 录';
+        pwdI.select();
+      }
+    }
+  }
+
+  function renderChangePwd(user, oldPwd) {
+    const newI = h('input', {
+      class: 'input', type: 'password', autocomplete: 'new-password',
+      placeholder: '至少 4 位', autofocus: true });
+    const repI = h('input', {
+      class: 'input', type: 'password', autocomplete: 'new-password',
+      placeholder: '再输一次' });
+    const err = h('div', { class: 'form-error hidden' });
+    const btn = h('button', { class: 'btn btn--primary btn--lg btn--block' }, '设置新密码并进入');
+
+    card.replaceChildren(
+      brand(),
+      h('div', { class: 'card login-card__box' }, [
+        h('div', { class: 'card__head' }, [
+          h('div', { class: 'card__title' }, '设置新密码'),
+          h('div', { class: 'card__hint' },
+            `${user.display_name || user.username} · 首次登录需修改初始密码`),
+        ]),
+        h('div', { class: 'card__body' }, h('form', {
+          class: 'login-form',
+          onsubmit: e => { e.preventDefault(); go(); },
+        }, [
+          err,
+          h('div', { class: 'match-banner match-banner--multi mb12' }, [
+            h('span', { class: 'match-banner__icon' }, '!'),
+            h('div', {}, '初始密码是公开的默认值，改成只有你知道的密码后再使用。'),
+          ]),
+          h('div', { class: 'field' }, [
+            h('label', { class: 'field__label' }, '新密码'), newI]),
+          h('div', { class: 'field' }, [
+            h('label', { class: 'field__label' }, '确认新密码'), repI]),
+          btn,
+        ])),
+      ]),
+      status,
+    );
+    status.replaceChildren(h('a', { class: 'link', href: '/login.html' },
+      '换个账号登录'));
+    newI.focus();
+
+    const fail = msg => { err.textContent = msg; err.classList.remove('hidden'); };
+    async function go() {
+      err.classList.add('hidden');
+      if (newI.value.length < 4) return fail('新密码至少 4 位');
+      if (newI.value !== repI.value) return fail('两次输入的新密码不一致');
+      btn.disabled = true;
+      btn.textContent = '提交中…';
+      try {
+        await api('/auth/password', { method: 'POST', body: {
+          old_password: oldPwd, new_password: newI.value } });
+        location.replace(safeNext);
+      } catch (e) {
+        fail(e.message || '修改失败');
+        btn.disabled = false;
+        btn.textContent = '设置新密码并进入';
+      }
+    }
+  }
+
+  // 服务连通性提示：连不上时直接说清楚，别让人反复试账号密码
+  status.replaceChildren('正在连接服务…');
+  try {
+    const s = await api('/health');
+    const db = s.db || {};
+    status.replaceChildren(
+      h('span', { class: 'dot dot--on' }),
+      `服务正常 · 退回 ${num(db.total)} 条 · 检测 ${num(db.inspected)} 条 · `
+      + `物料 ${num(db.item_master)} 条`,
+    );
+  } catch {
+    status.replaceChildren(h('span', { class: 'dot dot--off' }),
+      '服务未连接 —— 请确认后端已启动');
+  }
+})();
+</script>
+</body>
+</html>

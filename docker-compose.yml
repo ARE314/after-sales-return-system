@@ -1,0 +1,105 @@
+# 售后返件登记系统 —— docker compose 编排
+#
+#   cp .env.example .env      # 填管理员初始密码与对外地址
+#   docker compose up -d
+#   docker compose logs -f ars
+#
+# 端口暴露策略（重要）：容器内监听 0.0.0.0，但**宿主侧只绑 127.0.0.1**，
+# 由宿主上的 Nginx 反代对外（见 deploy/nginx.conf.sample）。
+# 直接把 8000/8100 映射到公网等于绕过了反代的 HTTPS 与访问控制。
+#
+# ⚠️ 本文件在本机**未经 docker compose 实测**（这台机器没装 Docker）。
+
+services:
+  ars:
+    build: .
+    image: ars:local
+    container_name: ars
+    restart: unless-stopped
+
+    # 只在宿主本机可达；对外交给反向代理
+    ports:
+      - "127.0.0.1:8000:8000"     # 主界面（人用，需登录）
+      - "127.0.0.1:8100:8100"     # 数据接口（金山定时任务用，需令牌）
+
+    volumes:
+      # 五个库 + 照片 + 备份都在这里。**必须持久化**，否则容器一删数据全没。
+      # 容器内路径固定为 /app/data（config.py 以项目目录为基准）。
+      - ./data:/app/data
+
+    environment:
+      # ---- 监听（容器内是 0.0.0.0，宿主侧靠上面的端口绑定收窄）----
+      ARS_HOST: "0.0.0.0"
+      ARS_PORT: "8000"
+      ARS_OPEN_API_HOST: "0.0.0.0"
+      ARS_OPEN_API_PORT: "8100"
+
+      # ---- 首个管理员（仅在 auth.db 用户表为空时生效）----
+      ARS_BOOTSTRAP_USER: "${ARS_BOOTSTRAP_USER:-admin}"
+      ARS_BOOTSTRAP_PASSWORD: "${ARS_BOOTSTRAP_PASSWORD:?必须在 .env 里设置初始管理员密码}"
+
+      # ---- 对外访问与 Cookie 安全（HTTPS 必须同时开这两个）----
+      ARS_PUBLIC_BASE_URL: "${ARS_PUBLIC_BASE_URL:-}"
+      ARS_COOKIE_SECURE: "${ARS_COOKIE_SECURE:-0}"
+      ARS_HTTPS_ONLY: "${ARS_HTTPS_ONLY:-0}"
+      # 反代容器/宿主地址。**只有配了它才信任 X-Forwarded-For**。
+      ARS_TRUSTED_PROXIES: "${ARS_TRUSTED_PROXIES:-}"
+
+      # ---- 数据接口白名单 ----
+      ARS_OPEN_API_IPS: "${ARS_OPEN_API_IPS:-}"
+
+      # ---- 定时备份（由 compose 里的 backup 服务使用）----
+      ARS_BACKUP_KEEP: "${ARS_BACKUP_KEEP:-14}"
+
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import json,sys,urllib.request as u; d=[json.load(u.urlopen('http://127.0.0.1:%d/api/%s'%(p,q),timeout=3)) for p,q in ((8000,'health'),(8100,'open/health'))]; sys.exit(0 if all(x.get('ok') for x in d) else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"      # 不限制的话 json 日志能把磁盘写满
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # 每天定时备份。与主服务共用同一个 data 卷：备份脚本对库只做
+  # 「只读 VACUUM INTO」，服务在跑也能安全备份。
+  #
+  # 为什么不用宿主 cron：容器化部署时宿主上不一定装了 Python；
+  # 用一个一次性容器复用同一个镜像，环境与主服务完全一致。
+  # ---------------------------------------------------------------------------
+  backup:
+    build: .
+    image: ars:local
+    container_name: ars-backup
+    restart: unless-stopped
+    depends_on:
+      ars:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
+    environment:
+      ARS_BACKUP_KEEP: "${ARS_BACKUP_KEEP:-14}"
+    # 常驻容器内循环：启动时先跑一次，之后每 24h 一次。
+    # （compose 没有内置调度器；要更精确的日历语义就用宿主的 systemd timer，
+    #   见 deploy/ars-backup.timer。）
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        echo "[backup] 启动，先做一次基线备份"
+        python tools/backup.py --keep "$${ARS_BACKUP_KEEP}" || echo "[backup] 基线备份失败，见上面的报错"
+        while true; do
+          sleep 86400
+          echo "[backup] 定时备份 $(date -Is)"
+          python tools/backup.py --keep "$${ARS_BACKUP_KEEP}" || echo "[backup] 备份失败，见上面的报错"
+        done
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

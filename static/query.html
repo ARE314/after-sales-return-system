@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>明细查询 · 售后返件登记系统</title>
+<link rel="stylesheet" href="/static/assets/app.css??v=20260920e">
+</head>
+<body>
+<script src="/static/assets/common.js??v=20260920e"></script>
+<script>
+(async () => {
+  const content = await mountLayout('query', '明细查询', '多条件筛选 · 关键词检索 · 导出 Excel', [
+    h('button', { class: 'btn btn--sm', onclick: () => load(1) }, '刷新'),
+    h('button', { class: 'btn btn--sm', onclick: doExport }, '导出 Excel'),
+  ]);
+
+  let META = null;
+  try { META = await api('/meta'); }
+  catch (e) { content.replaceChildren(h('div', { class: 'empty' }, '加载失败：' + e.message)); return; }
+
+  const state = {
+    page: 1, page_size: 50, sort_by: 'id', sort_dir: 'desc',
+    keyword: new URLSearchParams(location.search).get('kw') || '',
+    filters: {}, total: 0, rows: [],
+    selected: new Set(),   // 批量删除：跨页累积勾选的明细键
+  };
+
+  /* ---------------- 批量选择 ---------------- */
+  const selInfo = h('span', { class: 'small muted' }, '未选择');
+  const batchDelBtn = h('button', {
+    class: 'btn btn--sm btn--danger', disabled: true, onclick: batchDelete,
+  }, '批量删除');
+
+  function updateSelInfo(pendingCount) {
+    const n = state.selected.size;
+    selInfo.textContent = n ? `已选 ${n} 条` : '未选择';
+    selInfo.style.color = n ? 'var(--brand)' : '';
+    selInfo.style.fontWeight = n ? '600' : '';
+    batchDelBtn.disabled = !n && !pendingCount;
+  }
+
+  function toggleSelect(key, on, pageRows, trEl) {
+    if (on) state.selected.add(key); else state.selected.delete(key);
+    if (trEl) trEl.classList.toggle('is-picked', on);   // 立即高亮，不必重渲染
+    updateSelInfo();
+    // 同步表头全选/半选状态
+    const head = tableHost.querySelector('thead input[type="checkbox"]');
+    if (head && pageRows) {
+      const picked = pageRows.filter(r => state.selected.has(r.detail_key)).length;
+      head.checked = picked > 0 && picked === pageRows.length;
+      head.indeterminate = picked > 0 && picked < pageRows.length;
+    }
+  }
+
+  function clearSelection() {
+    if (!state.selected.size) return;
+    state.selected.clear();
+    updateSelInfo();
+    renderTable({ rows: state.rows });     // 取消勾选状态
+  }
+
+  async function batchDelete() {
+    const keys = [...state.selected];
+    if (!keys.length) { toast('请先勾选要删除的记录', 'warn'); return; }
+
+    const preview = keys.slice(0, 6).map(k => `<b class="mono">${escapeHtml(k)}</b>`).join('、');
+    const more = keys.length > 6
+      ? `<br>… 等共 <b>${keys.length}</b> 条` : '';
+    const ok = await confirmDialog(
+      `将删除 <b>${keys.length}</b> 条明细：<br>${preview}${more}<br><br>`
+      + '这些记录关联的检测结果也会一并删除，<b>删除后不可恢复</b>。确定继续吗？',
+      { title: '批量删除', danger: true });
+    if (!ok) return;
+
+    batchDelBtn.disabled = true;
+    try {
+      const res = await api('/returns/batch-delete', {
+        method: 'POST', body: { detail_keys: keys },
+      });
+      toast(`已删除 ${res.deleted} 条`
+        + (res.missing ? `（另有 ${res.missing} 条已不存在）` : ''), 'success');
+      state.selected.clear();
+      updateSelInfo();
+      load(state.page);
+    } catch (e) {
+      toast('删除失败：' + e.message, 'error');
+      updateSelInfo();
+    }
+  }
+
+  /* 条件指纹：筛选 / 搜索 / 排序 / 页长 变化时清空勾选，仅翻页则保留 */
+  let lastCondKey = null;
+  function condKey() {
+    return JSON.stringify([state.keyword, filterState, state.page_size,
+                           state.sort_by, state.sort_dir]);
+  }
+
+  /* ---------------- 列定义 ---------------- */
+  const DEFAULT_COLS = ['detail_key', 'return_no', 'return_date', 'turbine_vendor',
+    'product_model', 'product_category', 'product_name', 'feedback_issue',
+    'completion', 'registrar'];
+  let visibleCols = (() => {
+    try {
+      const s = JSON.parse(localStorage.getItem('q_cols') || 'null');
+      return Array.isArray(s) && s.length ? s : [...DEFAULT_COLS];
+    } catch { return [...DEFAULT_COLS]; }
+  })();
+
+  /* ---------------- 搜索栏 ---------------- */
+  const kwInput = h('input', {
+    class: 'input', style: { width: '280px' },
+    placeholder: '搜索单号 / 条码 / 型号 / 厂家 / 现场…', value: state.keyword,
+  });
+  let kwTimer = null;
+  kwInput.addEventListener('input', () => {
+    clearTimeout(kwTimer);
+    kwTimer = setTimeout(() => { state.keyword = kwInput.value.trim(); load(1); }, 300);
+  });
+  kwInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { clearTimeout(kwTimer); state.keyword = kwInput.value.trim(); load(1); }
+  });
+
+  /* ---------------- 筛选项 ---------------- */
+  const filterGrid = h('div', { class: 'grid grid--4' });
+  const filterState = {};
+
+  function buildFilters() {
+    const entries = META.filter_fields.map(f => {
+      const sel = h('select', { class: 'select select--sm', id: 'flt-' + f.name },
+        [h('option', { value: '' }, '全部' + f.label)]);
+
+      function fill(list, withCount) {
+        sel.replaceChildren(
+          h('option', { value: '' }, '全部' + f.label),
+          ...list.map(o => {
+            const v = (o && typeof o === 'object') ? o.value : o;
+            const c = (o && typeof o === 'object') ? o.use_count : null;
+            return h('option', { value: v }, withCount && c ? `${v} (${c})` : String(v));
+          }));
+      }
+      if (f.options && f.options.length) {
+        fill(f.options, false);            // 固定选项字段（如 分析报告 是/否）
+      } else {
+        DictCache.getWithCount(f.name).then(opts => fill(opts, true)).catch(() => {});
+      }
+      sel.addEventListener('change', () => {
+        if (sel.value) filterState[f.name] = sel.value; else delete filterState[f.name];
+        load(1);
+      });
+      return h('div', { class: 'field', style: { marginBottom: '0' } }, [
+        h('label', { class: 'field__label' }, f.label), sel,
+      ]);
+    });
+
+    // 日期区间
+    const dFrom = h('input', { class: 'input input--sm', type: 'date', id: 'flt-date-from' });
+    const dTo = h('input', { class: 'input input--sm', type: 'date', id: 'flt-date-to' });
+    [dFrom, dTo].forEach(el => el.addEventListener('change', () => {
+      if (dFrom.value) filterState['return_date_from'] = dFrom.value; else delete filterState['return_date_from'];
+      if (dTo.value) filterState['return_date_to'] = dTo.value; else delete filterState['return_date_to'];
+      load(1);
+    }));
+    const dateRow = h('div', { class: 'field', style: { marginBottom: '0' } }, [
+      h('label', { class: 'field__label' }, '退回时间区间'),
+      h('div', { class: 'flex' }, [dFrom, h('span', { class: 'muted' }, '~'), dTo]),
+    ]);
+
+    filterGrid.replaceChildren(dateRow, ...entries);
+  }
+  buildFilters();
+
+  const filterCard = h('div', { class: 'card mb12' }, [
+    h('div', { class: 'card__head' }, [
+      h('div', { class: 'card__title' }, '筛选条件'),
+      h('div', { class: 'card__tools' }, [
+        h('button', { class: 'btn btn--sm btn--ghost', onclick: resetFilters }, '重置筛选'),
+        h('button', {
+          class: 'btn btn--sm btn--ghost',
+          onclick: () => filterCard.querySelector('.card__body').classList.toggle('hidden'),
+        }, '收起/展开'),
+      ]),
+    ]),
+    h('div', { class: 'card__body' }, filterGrid),
+  ]);
+
+  function resetFilters() {
+    Object.keys(filterState).forEach(k => delete filterState[k]);
+    $$('select', filterGrid).forEach(s => s.value = '');
+    $('#flt-date-from').value = ''; $('#flt-date-to').value = '';
+    kwInput.value = ''; state.keyword = '';
+    load(1);
+  }
+
+  /* ---------------- 表格 ---------------- */
+  const tableHost = h('div', { class: 'table-wrap' });
+  const pagerHost = h('div', { class: 'pager' });
+  const summaryLine = h('div', { class: 'card__hint', id: 'summary' });
+
+  const tableCard = h('div', { class: 'card' }, [
+    h('div', { class: 'card__head' }, [
+      h('div', { class: 'card__title' }, '返件明细'),
+      summaryLine,
+      h('div', { class: 'card__tools' }, [
+        selInfo,
+        batchDelBtn,
+        h('button', { class: 'btn btn--sm btn--ghost', onclick: clearSelection }, '清空选择'),
+        h('button', { class: 'btn btn--sm btn--ghost', id: 'btn-cols',
+          onclick: openColumnPicker },
+          `列设置 (${visibleCols.length}/${META.table_columns.length})`),
+        h('button', { class: 'btn btn--sm btn--ghost', onclick: () => load(state.page) }, '刷新'),
+      ]),
+    ]),
+    tableHost,
+    pagerHost,
+  ]);
+
+  content.replaceChildren(
+    h('div', { class: 'card mb12' }, h('div', { class: 'card__body flex flex-wrap' }, [
+      kwInput,
+      h('span', { class: 'small muted' }, '支持单号、条码、型号、厂家、现场、备注等模糊检索'),
+      h('div', { class: 'topbar__spacer' }),
+      h('button', { class: 'btn btn--sm', onclick: doExport }, '导出当前结果'),
+    ])),
+    filterCard,
+    tableCard,
+  );
+
+  /* ---------------- 数据加载 ---------------- */
+  async function load(page = 1) {
+    state.page = page;
+    // 筛选/搜索/排序变化 → 清空勾选（避免删掉上一次条件下的残留选择）；
+    // 仅翻页 → 保留勾选，便于跨页挑选
+    const ck = condKey();
+    if (ck !== lastCondKey) {
+      lastCondKey = ck;
+      if (state.selected.size) {
+        state.selected.clear();
+        toast('筛选条件已变化，已清空勾选', 'info');
+      }
+      updateSelInfo();
+    }
+    tableHost.replaceChildren(h('div', { class: 'empty' }, '加载中…'));
+    try {
+      const q = Object.assign({}, filterState, {
+        keyword: state.keyword, page: state.page, page_size: state.page_size,
+        sort_by: state.sort_by, sort_dir: state.sort_dir,
+      });
+      const res = await api('/returns?' + qs(q));
+      state.rows = res.rows; state.total = res.total;
+      renderTable(res);
+      renderPager(res);
+      summaryLine.textContent = `共 ${num(res.total)} 条 · 第 ${res.page}/${Math.max(1, res.pages)} 页`;
+    } catch (e) {
+      tableHost.replaceChildren(h('div', { class: 'empty' }, '加载失败：' + e.message));
+    }
+  }
+
+  function renderTable(res) {
+    if (!res.rows.length) {
+      tableHost.replaceChildren(h('div', { class: 'empty' }, [
+        h('div', { class: 'empty__icon' }, '○'),
+        '没有符合条件的记录',
+      ]));
+      return;
+    }
+    const cols = visibleCols;
+    const pageRows = res.rows || [];
+    const picked = pageRows.filter(r => state.selected.has(r.detail_key)).length;
+
+    const headCb = h('input', { type: 'checkbox', title: '全选本页' });
+    headCb.checked = picked > 0 && picked === pageRows.length;
+    headCb.indeterminate = picked > 0 && picked < pageRows.length;
+    headCb.addEventListener('click', e => e.stopPropagation());
+    headCb.addEventListener('change', () => {
+      pageRows.forEach(r => {
+        if (headCb.checked) state.selected.add(r.detail_key);
+        else state.selected.delete(r.detail_key);
+      });
+      updateSelInfo();
+      renderTable(res);
+    });
+
+    const thead = h('thead', {}, h('tr', {}, [
+      h('th', { style: { width: '36px', textAlign: 'center' } }, headCb),
+      ...cols.map(c => {
+        const isSorted = state.sort_by === c;
+        return h('th', {
+          style: { cursor: 'pointer', userSelect: 'none' },
+          onclick: () => {
+            if (state.sort_by === c) state.sort_dir = state.sort_dir === 'asc' ? 'desc' : 'asc';
+            else { state.sort_by = c; state.sort_dir = 'desc'; }
+            load(1);
+          },
+        }, [
+          META.field_labels[c] || c,
+          isSorted ? h('span', { class: 'small', style: { marginLeft: '4px', color: '#185fa5' } },
+            state.sort_dir === 'asc' ? '▲' : '▼') : null,
+        ]);
+      }),
+    ]));
+
+    const tbody = h('tbody', {}, pageRows.map(r => {
+      const rowCb = h('input', { type: 'checkbox' });
+      rowCb.checked = state.selected.has(r.detail_key);
+      rowCb.addEventListener('click', e => e.stopPropagation());   // 别触发打开详情
+      rowCb.addEventListener('change', () =>
+        toggleSelect(r.detail_key, rowCb.checked, pageRows, rowCb.closest('tr')));
+
+      return h('tr', {
+        class: state.selected.has(r.detail_key) ? 'is-picked' : '',
+        onclick: e => {
+          if (e.target.closest('a') || e.target.tagName === 'INPUT') return;
+          openDetail(r);
+        },
+        style: { cursor: 'pointer' },
+      }, [
+        h('td', { style: { textAlign: 'center' } }, rowCb),
+        ...cols.map(c => {
+          let content = r[c];
+          if (c === 'completion') return h('td', {}, completionTag(r[c]));
+          if (c === 'detail_key') {
+            return h('td', {}, h('span', { class: 'link-cell' }, r[c] || ''));
+          }
+          if (c === 'registered_at') return h('td', { class: 'muted' }, fmtDateTime(r[c]));
+          if (c === 'return_qty') return h('td', { class: 'num' }, num(r[c]));
+          if (c === 'return_date' || c === 'test_date') return h('td', {}, fmtDate(r[c]));
+          if (['test_result', 'fault_cause', 'improvement', 'remark'].includes(c)) {
+            return h('td', { class: 'cell-wrap', title: content || '' }, content || '');
+          }
+          return h('td', { title: content ?? '' }, content ?? '');
+        }),
+      ]);
+    }));
+
+    tableHost.replaceChildren(h('table', { class: 'table' }, [thead, tbody]));
+    updateSelInfo();
+  }
+
+  function renderPager(res) {
+    const sizes = [20, 50, 100, 200];
+    const sizeSel = h('select', { class: 'select select--sm', style: { width: '92px' } },
+      sizes.map(s => h('option', { value: s, selected: s === state.page_size ? 'selected' : null }, `${s} 条/页`)));
+    sizeSel.addEventListener('change', () => { state.page_size = Number(sizeSel.value); load(1); });
+
+    const btn = (text, page, disabled) => h('button', {
+      class: 'btn btn--sm', disabled: disabled ? 'disabled' : null,
+      onclick: () => load(page),
+    }, text);
+
+    const jump = h('input', {
+      class: 'input input--sm', style: { width: '60px' }, type: 'number', min: 1,
+      max: Math.max(1, res.pages), placeholder: '页码',
+    });
+    jump.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        const p = Math.min(Math.max(1, Number(jump.value) || 1), Math.max(1, res.pages));
+        load(p);
+      }
+    });
+
+    pagerHost.replaceChildren(
+      h('span', {}, `共 ${num(res.total)} 条，${Math.max(1, res.pages)} 页`),
+      h('div', { class: 'pager__spacer' }),
+      sizeSel,
+      btn('首页', 1, res.page <= 1),
+      btn('上一页', res.page - 1, res.page <= 1),
+      h('span', { class: 'mono', style: { padding: '0 4px' } }, `${res.page} / ${Math.max(1, res.pages)}`),
+      btn('下一页', res.page + 1, res.page >= res.pages),
+      btn('末页', res.pages, res.page >= res.pages),
+      jump,
+    );
+  }
+
+  /* ---------------- 列设置 ---------------- */
+  function openColumnPicker() {
+    const all = META.table_columns;
+
+    // 按字段分组归类 —— 25 列平铺容易看花眼，分组后能快速定位
+    const groupOf = {};
+    (META.field_groups || []).forEach(g =>
+      g.fields.forEach(f => { groupOf[f.name] = g.title; }));
+    const byGroup = [];
+    all.forEach(c => {
+      const title = groupOf[c] || '其他';
+      let g = byGroup.find(x => x.title === title);
+      if (!g) { g = { title, cols: [] }; byGroup.push(g); }
+      g.cols.push(c);
+    });
+
+    const boxes = new Map();                 // 列名 → checkbox
+    const counter = h('span', { class: 'colpick__count' });
+    const applyBtn = h('button', { class: 'btn btn--primary' }, '应用');
+    const maxHint = h('span', { class: 'colpick__warn hidden' },
+      '选的列较多时表格会横向滚动');
+
+    function refreshCount() {
+      const n = [...boxes.values()].filter(i => i.checked).length;
+      counter.textContent = `已选 ${n} / ${all.length} 列`;
+      applyBtn.disabled = n === 0;
+      maxHint.classList.toggle('hidden', n <= 12);
+    }
+
+    function setAll(on) {
+      boxes.forEach(i => { i.checked = on; });
+      refreshCount();
+    }
+
+    const body = h('div', {}, [
+      h('div', { class: 'colpick__bar' }, [
+        h('div', { class: 'small muted' }, '勾选需要在明细表格中展示的字段，设置保存在本机浏览器。'),
+        h('div', { class: 'colpick__bar-right' }, [
+          counter,
+          h('button', { class: 'btn btn--sm btn--ghost', type: 'button',
+            onclick: () => setAll(true) }, '全选'),
+          h('button', { class: 'btn btn--sm btn--ghost', type: 'button',
+            onclick: () => setAll(false) }, '全不选'),
+          h('button', { class: 'btn btn--sm btn--ghost', type: 'button',
+            onclick: () => {
+              boxes.forEach((i, name) => { i.checked = DEFAULT_COLS.includes(name); });
+              refreshCount();
+            } }, '恢复默认'),
+        ]),
+      ]),
+      maxHint,
+      ...byGroup.map(g => h('div', { class: 'colpick__group' }, [
+        h('div', { class: 'colpick__group-title' },
+          [g.title, h('span', { class: 'colpick__group-n' }, `${g.cols.length} 列`)]),
+        h('div', { class: 'colpick__grid' }, g.cols.map(c => {
+          const cb = h('input', {
+            type: 'checkbox', value: c,
+            checked: visibleCols.includes(c) ? 'checked' : null,
+          });
+          cb.addEventListener('change', refreshCount);
+          boxes.set(c, cb);
+          return h('label', { class: 'colpick__item' },
+            [cb, h('span', {}, META.field_labels[c] || c)]);
+        })),
+      ])),
+    ]);
+
+    applyBtn.addEventListener('click', () => {
+      const picked = [...boxes.values()].filter(i => i.checked).map(i => i.value);
+      if (!picked.length) { toast('至少选择一列', 'warn'); return; }
+      visibleCols = META.table_columns.filter(c => picked.includes(c));
+      localStorage.setItem('q_cols', JSON.stringify(visibleCols));
+      updateColsBtn();
+      m.close();
+      renderTable({ rows: state.rows });
+      toast(`已显示 ${visibleCols.length} 列`, 'success');
+    });
+
+    const m = openModal({
+      title: '列设置', wide: true,
+      body,
+      footer: [
+        h('button', { class: 'btn', onclick: () => m.close() }, '取消'),
+        applyBtn,
+      ],
+    });
+    refreshCount();
+  }
+
+  /** 列设置按钮上直接显示已选列数，不必打开面板才知道 */
+  function updateColsBtn() {
+    const btn = document.getElementById('btn-cols');
+    if (btn) btn.textContent = `列设置 (${visibleCols.length}/${META.table_columns.length})`;
+  }
+
+  /* ---------------- 详情 / 编辑 ---------------- */
+  async function openDetail(row) {
+    const groups = META.field_groups;
+    const inputs = {};
+
+    function makeField(f) {
+      const id = 'e-' + f.name;
+
+      // 照片证据：网格控件自带取值接口，不走下面的通用 input 逻辑
+      if (f.type === 'photos') {
+        const pg = photoGrid({
+          name: f.name, detailKey: row.detail_key || '',
+          orderNo: row.order_no || '', value: row[f.name],
+          limits: META.photo_limits || {},
+        });
+        inputs[f.name] = pg;
+        return h('div', {
+          class: 'field field--wide', style: { marginBottom: '0' },
+        }, [
+          h('label', { class: 'field__label' }, f.label), pg,
+        ]);
+      }
+
+      // 可搜索下拉 + 远程候选（同退回登记明细行：料号查匹配库、其余查历史值）
+      if (f.type === 'search-item') {
+        const cb = combobox({
+          name: f.name,
+          options: [],
+          allowNew: true,
+          value: (row[f.name] === null || row[f.name] === undefined)
+            ? '' : String(row[f.name]),
+          placeholder: '输入关键字搜索',
+          remoteSearch: kw => fetchCandidates(f, kw),
+        });
+        cb.input.dataset.field = f.name;
+        inputs[f.name] = cb;             // 有 .value 访问器，保存时按它取值
+        return h('div', {
+          class: 'field', style: { marginBottom: '0' },
+        }, [
+          h('label', { class: 'field__label' }, f.label), cb,
+        ]);
+      }
+
+      let el;
+      if (f.type === 'textarea') {
+        el = h('textarea', { class: 'textarea', id });
+      } else if (f.type === 'select-dict') {
+        const listId = 'edl-' + f.name;
+        el = h('input', { class: 'input', id, list: listId, autocomplete: 'off' });
+        const dl = h('datalist', { id: listId });
+        DictCache.get(f.name).then(vs =>
+          dl.replaceChildren(...vs.map(v => h('option', { value: v })))).catch(() => {});
+        el = h('div', {}, [el, dl]);
+      } else if (f.type === 'select-fixed') {
+        const opts = (META.fixed_options && META.fixed_options[f.name]) || [];
+        // no_empty 的字段是「空值即默认值」的两值字段：不给空选项，
+        // 编辑历史空值时直接落到默认值（与处理登记页、后端归一三处一致）
+        el = h('select', { class: 'input', id }, [
+          f.no_empty ? null : h('option', { value: '' }, '未填写'),
+          ...opts.map(o => h('option', { value: o }, o)),
+        ]);
+        // 注意：这里必须读 row（本函数的入参），不能写 cur ——
+        // cur 是 scan.html 里别的函数的局部变量，在本文件里未声明；
+        // 写错会让 makeField 抛 ReferenceError，openDetail 整体中断，
+        // 表现为「点明细行没反应、编辑弹窗根本不出现」（语法检查查不出来）。
+        if (f.no_empty) {
+          const nv = row[f.name];
+          el.value = (nv === null || nv === undefined)
+            ? (f.default || '') : String(nv);
+        }
+      } else {
+        el = h('input', {
+          class: 'input', id,
+          type: f.type === 'number' ? 'number' : (f.type === 'date' ? 'date' : 'text'),
+          step: f.type === 'number' ? 'any' : null,
+        });
+      }
+      const target = (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+        || el.tagName === 'SELECT') ? el : el.querySelector('input, textarea');
+      const v = row[f.name];
+      if (f.name === 'return_date' || f.name === 'test_date') {
+        target.value = v ? fmtDate(v) : '';
+      } else {
+        target.value = (v === null || v === undefined) ? '' : v;
+      }
+      // auto 标记的字段是系统派生的（如完结状况），任何页面都不可编辑
+      if (f.auto && target) {
+        target.readOnly = true;
+        target.disabled = target.tagName === 'SELECT';
+        target.classList.add('input--locked');
+        target.title = '由检测字段自动判定，不可手工修改';
+      }
+      inputs[f.name] = target;
+      return h('div', { class: 'field', style: { marginBottom: '0' } }, [
+        h('label', { class: 'field__label', for: id }, f.label), el,
+      ]);
+    }
+
+    const body = h('div', {}, [
+      h('div', { class: 'match-banner match-banner--hit mb12' }, [
+        h('span', { class: 'match-banner__icon' }, '◎'),
+        h('div', {}, [
+          h('div', { class: 'mono', style: { fontWeight: '600' } }, row.detail_key || ''),
+          h('div', { class: 'small' },
+            `售后单号 ${row.order_no || '—'} · 行号 ${row.line_no ?? '—'} · 登记于 ${fmtDateTime(row.registered_at)}`),
+        ]),
+      ]),
+      ...groups.map(g => h('div', { class: 'mb12' }, [
+        h('div', { style: { fontWeight: '600', marginBottom: '8px', fontSize: '13px' } }, g.title),
+        h('div', { class: 'grid grid--3' }, g.fields.map(makeField)),
+      ])),
+    ]);
+
+    const m = openModal({
+      title: '编辑返件明细', wide: true, body,
+      footer: [
+        h('button', {
+          class: 'btn btn--danger',
+          onclick: async () => {
+            const ok = await confirmDialog(
+              `确定删除记录 <b class="mono">${escapeHtml(row.detail_key)}</b> 吗？删除后不可恢复。`,
+              { title: '删除记录', danger: true });
+            if (!ok) return;
+            try {
+              await api('/returns/' + encodeURIComponent(row.detail_key), { method: 'DELETE' });
+              DictCache.invalidate();
+              toast('已删除', 'success'); m.close(); load(state.page);
+            } catch (e) { toast('删除失败：' + e.message, 'error'); }
+          },
+        }, '删除'),
+        h('div', { class: 'topbar__spacer' }),
+        h('button', { class: 'btn', onclick: () => m.close() }, '取消'),
+        h('button', {
+          class: 'btn btn--primary',
+          onclick: async () => {
+            const data = {};
+            Object.entries(inputs).forEach(([k, el]) => { data[k] = (el.value || '').trim(); });
+            delete data.order_no;
+            try {
+              await api('/returns/' + encodeURIComponent(row.detail_key), { method: 'PUT', body: data });
+              DictCache.invalidate();
+              toast('已保存', 'success'); m.close(); load(state.page);
+            } catch (e) { toast('保存失败：' + e.message, 'error'); }
+          },
+        }, '保存修改'),
+      ],
+    });
+  }
+
+  /* ---------------- 导出 ---------------- */
+  function doExport() {
+    const q = Object.assign({}, filterState, { keyword: state.keyword });
+    const url = '/api/export?' + qs(q);
+    download(url);
+    toast('正在生成 Excel，请留意浏览器下载', 'info');
+  }
+
+  /* 从 URL 带入关键词时直接搜索 */
+  if (state.keyword) kwInput.value = state.keyword;
+  load(1);
+})();
+</script>
+</body>
+</html>

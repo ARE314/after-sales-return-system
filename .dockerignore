@@ -1,0 +1,30 @@
+# 构建镜像时排除的东西 —— 既减小镜像，也避免把本机数据/凭据带进去。
+#
+# ⚠️ 重点：**data/ 必须排除**。它装着本机运行的五个库（含用户密码哈希、
+# 审计日志）与照片。打进镜像等于把生产数据固化进一个可以到处分发的产物里，
+# 而且换个环境跑起来会直接用这份旧数据。运行期靠 compose 的卷挂载提供。
+data/
+.backups/
+
+# 自检凭据：本机文件，绝不进镜像
+tests/_smoke.env
+tests/_smoke_created.txt
+
+# Python 产物
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# 版本控制与编辑器
+.git/
+.gitignore
+.workbuddy/
+.vscode/
+.idea/
+
+# 部署产物与文档草稿（镜像里要的是代码，不是宿主的历史快照）
+deploy/*.local
+*.log
+*.tmp

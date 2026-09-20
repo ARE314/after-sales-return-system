@@ -1,0 +1,33 @@
+# 售后返件登记系统 —— 定时备份（systemd timer）
+#
+# 配套 ars-backup.service。安装：
+#     sudo cp deploy/ars-backup.service deploy/ars-backup.timer /etc/systemd/system/
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now ars-backup.timer
+#     systemctl list-timers ars-backup.timer        # 看下次触发时间
+#     journalctl -u ars-backup -n 50                # 看最近几次结果
+#
+# 为什么用 timer 而不是 cron：
+#   · 与主服务同一套托管方式，日志进 journald（`journalctl -u ars-backup`）；
+#   · 支持 Persistent=true —— 服务器在触发时刻是关机状态的话，开机后补跑一次
+#     （cron 默认不会补，容易连续几天没备份却没人发现）；
+#   · 失败能在 systemctl --failed 里看到。
+#
+# 注释字符必须是 `#`（systemd 只认它，别用 .ini 风格的 `;`）。
+
+[Unit]
+Description=售后返件登记系统 —— 定时数据备份
+Documentation=file:/opt/ars/deploy/README.md
+# 不需要等网络：备份是纯本地磁盘操作
+
+[Timer]
+# 每天 02:30 跑一次（业务低峰）。OnCalendar 用服务器本地时区。
+OnCalendar=*-*-* 02:30:00
+# 错过就补跑（关机 / 休眠期间错过的会合并成一次）
+Persistent=true
+# 打散：多台机器同时备份时避免同一秒抢 IO
+RandomizedDelaySec=300
+Unit=ars-backup.service
+
+[Install]
+WantedBy=timers.target

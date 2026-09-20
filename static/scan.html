@@ -1,0 +1,1234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>退回登记 · 售后返件登记系统</title>
+<link rel="stylesheet" href="/static/assets/app.css??v=20260920e">
+</head>
+<body>
+<script src="/static/assets/lib/zxing.min.js??v=20260920e" onerror="window.__zxing_failed=1"></script>
+<script src="/static/assets/common.js??v=20260920e"></script>
+<script>
+(async () => {
+  const modeTag = h('span', { class: 'tag tag--brand' }, '待扫描');
+  const content = await mountLayout('scan', '退回登记',
+    '一个快递单对应多行产品明细，一行一只；检测信息请在「检测登记」中录入',
+    [modeTag, h('button', { class: 'btn btn--sm', onclick: () => resetAll(true) }, '清空重填')]);
+
+  /* ================= 元数据 ================= */
+  let META;
+  try {
+    META = await api('/meta');
+  } catch (e) {
+    content.replaceChildren(h('div', { class: 'empty' }, '加载失败：' + e.message));
+    return;
+  }
+
+  const HEADER_FIELD_MAP = {};
+  META.header_groups.forEach(g => g.fields.forEach(f => { HEADER_FIELD_MAP[f.name] = f; }));
+  const LINE_FIELD_MAP = {};
+  META.line_groups.forEach(g => g.fields.forEach(f => { LINE_FIELD_MAP[f.name] = f; }));
+  const FIXED = META.fixed_options || {};
+  // 快递公司识别规则（退回单号前缀 → 快递公司），由后端 config 下发
+  const CARRIER_RULES = META.carrier_rules || [];
+
+  const DICT_FIELDS = [];
+  [...META.header_groups, ...META.line_groups].forEach(g =>
+    g.fields.forEach(f => { if (f.type === 'search-dict') DICT_FIELDS.push(f.name); }));
+  let DICT = {};
+  try { DICT = await loadDictMap(DICT_FIELDS); } catch { DICT = {}; }
+
+  /* ================= 状态 ================= */
+  const header = {};          // 整单共享字段值
+  let rows = [];              // 明细行
+  let rowSeq = 0;             // 行内部 id
+  let lastCode = '';
+  let camReader = null;
+
+  /* ================= 控件工厂 ================= */
+  function wrapControl(el) {
+    if (!el.getValue) {
+      el.getValue = () => (el.value || '').trim();
+      el.setValue = v => { el.value = v ?? ''; };
+    }
+    return el;
+  }
+
+  /* ================= 明细行的候选检索 =================
+     与检测登记的模糊匹配同一套交互：输入关键字 → 弹候选 → 选中。
+     候选来源由 fetchCandidates（common.js）按字段的 source 决定 ——
+     料号来自**匹配数据库**（输入片段即模糊匹配，选中后照旧自动回填），
+     产品编号 / 生产年月来自**历史登记过的值**。 */
+
+  function buildControl(f, opts = {}) {
+    const { rowObj = null, compact = false } = opts;
+
+    if (f.type === 'search-item') {
+      const cb = combobox({
+        name: f.name,
+        options: DICT[f.name] || [],
+        allowNew: true,
+        value: (rowObj ? rowObj[f.name] : header[f.name]) || '',
+        placeholder: compact ? '' : (f.placeholder || '输入关键字搜索'),
+        className: compact ? 'cell-cb' : '',
+        remoteSearch: kw => fetchCandidates(f, kw),
+        onChange: v => {
+          if (rowObj) rowObj[f.name] = v; else header[f.name] = v;
+          // 选中候选即视为「确定输入」→ 触发对应的自动补全（与回车一致）
+          if (!rowObj) { updateStats(); return; }
+          if (f.name === 'material_no') triggerMaterialFill(rowObj);
+          else if (f.name === 'product_code') triggerPeriodFill(rowObj);
+        },
+        onEnter: () => {
+          if (!rowObj) return;
+          if (f.name === 'material_no') triggerMaterialFill(rowObj);
+          else if (f.name === 'product_code') triggerPeriodFill(rowObj);
+        },
+      });
+      cb.input.dataset.field = f.name;
+      if (rowObj) cb.input.dataset.row = String(rowObj._id);
+      cb.name = f.name;
+      // 纯手打（不点候选）的内容同样要回写数据对象，否则提交时整段丢掉
+      cb.input.addEventListener('input', () => {
+        const v = cb.input.value.trim();
+        if (rowObj) rowObj[f.name] = v; else header[f.name] = v;
+      });
+      return cb;
+    }
+
+    if (f.type === 'search-dict') {
+      const cb = combobox({
+        name: f.name,
+        options: DICT[f.name] || [],
+        allowNew: true,
+        value: (rowObj ? rowObj[f.name] : header[f.name]) || '',
+        placeholder: compact ? '' : '可选择或输入新值',
+        className: compact ? 'cell-cb' : '',
+        onChange: v => { if (rowObj) rowObj[f.name] = v; else header[f.name] = v; updateStats(); },
+      });
+      cb.input.dataset.field = f.name;
+      // 行标记必须同时带上：事件委托靠 data-row 从格反查所属明细行，
+      // select-fixed 分支一直有，可搜索下拉此前漏设，导致按行操作失效。
+      if (rowObj) cb.input.dataset.row = String(rowObj._id);
+      cb.name = f.name;
+      // combobox 只在「选中候选项」时回调 onChange，纯手打（不点候选、不点
+      // 「＋ 使用新值」）的内容不会回写数据对象 —— 提交时会整段丢掉。
+      // 这里补上实时同步，保证「看到什么就提交什么」。
+      cb.input.addEventListener('input', () => {
+        const v = cb.input.value.trim();
+        if (rowObj) rowObj[f.name] = v; else header[f.name] = v;
+      });
+      return cb;
+    }
+
+    if (f.type === 'select-fixed') {
+      const sel = fixedSelect({
+        name: f.name,
+        options: FIXED[f.name] || [],
+        value: (rowObj ? rowObj[f.name] : header[f.name]) || '',
+        onChange: v => {
+          if (rowObj) rowObj[f.name] = v; else header[f.name] = v;
+        },
+      });
+      sel.dataset.field = f.name;
+      if (rowObj) sel.dataset.row = String(rowObj._id);
+      if (compact) { sel.classList.remove('input'); sel.classList.add('cell-input'); }
+      return sel;
+    }
+
+    if (f.type === 'textarea') {
+      const ta = h('textarea', {
+        class: 'textarea', dataset: { field: f.name },
+        style: rowObj ? { minHeight: '54px' } : {},
+      });
+      // 行标记：事件委托靠 data-row 从格反查所属明细行（见 rowFromCell）
+      if (rowObj) ta.dataset.row = String(rowObj._id);
+      ta.value = (rowObj ? rowObj[f.name] : header[f.name]) || '';
+      ta.addEventListener('input', () => {
+        if (rowObj) rowObj[f.name] = ta.value.trim(); else header[f.name] = ta.value.trim();
+      });
+      return wrapControl(ta);
+    }
+
+    const el = h('input', {
+      class: compact
+        ? ('cell-input' + (f.scan ? ' cell-input--code' : '')
+           + (f.type === 'number' ? ' cell-input--num' : '')
+           + (f.type === 'date' ? ' cell-input--date' : ''))
+        : ('input' + (f.scan ? ' input--mono' : '')),
+      type: f.type === 'number' ? 'number' : (f.type === 'date' ? 'date' : 'text'),
+      step: f.type === 'number' ? 'any' : null,
+      placeholder: compact ? '' : (f.placeholder || ''),
+      dataset: { field: f.name },
+    });
+    // 行标记：事件委托靠 data-row 从格反查所属明细行（见 rowFromCell）
+    if (rowObj) el.dataset.row = String(rowObj._id);
+    el.value = (rowObj ? rowObj[f.name] : header[f.name]) ?? '';
+    if (f.default === 'today') el.value = today();
+    else if (f.default !== undefined) el.value = f.default;
+    if (f.readonly && !rowObj) {
+      el.readOnly = true;
+      el.title = '固定为当天日期，不可修改';
+    }
+    if (rowObj) {
+      el.addEventListener('input', () => {
+        rowObj[f.name] = el.value.trim();
+        if (f.name === 'return_qty') updateStats();
+      });
+    } else {
+      el.addEventListener('input', () => { header[f.name] = el.value.trim(); });
+    }
+    return wrapControl(el);
+  }
+
+  /* ================= 布局骨架 ================= */
+  const scanInput = h('input', {
+    class: 'scan-hero__input', autocomplete: 'off',
+    placeholder: '扫描：快递单号 / 产品编号 / 料号 / 售后单号',
+  });
+  const stateLine = h('div', { class: 'scan-hero__state' }, [h('span', {}, '等待输入…')]);
+  const camBtn = h('button', { class: 'btn btn--on-dark btn--sm', onclick: toggleCamera }, '摄像头扫码');
+  const video = h('video', { playsinline: true, muted: true });
+  const camPanel = h('div', { class: 'video-wrap mb16 hidden' }, [video, h('div', { class: 'scan-line' })]);
+
+  const hero = h('div', { class: 'scan-hero mb16' }, [
+    h('div', { class: 'scan-hero__input-wrap' }, [
+      h('div', { class: 'scan-hero__label' }, '扫描 / 输入条码　·　产品码自动新增一行'),
+      scanInput, stateLine,
+    ]),
+    h('div', { class: 'scan-hero__actions' }, [
+      h('button', {
+        class: 'btn btn--on-dark btn--sm',
+        onclick: () => { lastCode = ''; handleCode(scanInput.value.trim()); },
+      }, '立即匹配'),
+      camBtn,
+      h('button', { class: 'btn btn--on-dark btn--sm', onclick: () => addRow() }, '＋ 空白行'),
+    ]),
+  ]);
+
+  const bannerHost = h('div', { id: 'match-banner' });
+  const headerHost = h('div', { id: 'header-host' });
+  const checkBannerHost = h('div', { id: 'check-banner' });
+  const tableHost = h('div', { class: 'line-scroll', id: 'line-host' });
+  const lineStats = h('div', { class: 'line-stats' }, '0 行产品');
+  const fillHint = h('div', { class: 'line-fill-hint' }, '');
+  const submitInfo = h('div', { class: 'submit-bar__info' }, '');
+
+  const lineToolbar = h('div', { class: 'line-toolbar' }, [
+    h('button', { class: 'btn btn--sm btn--primary', onclick: () => addRow() }, '＋ 新增一行'),
+    h('button', {
+      class: 'btn btn--sm', onclick: () => {
+        if (!rows.length) { toast('没有可清空的行', 'warn'); return; }
+        rows = [];
+        renderTable();
+        scheduleCheck();
+        toast('已清空产品明细', 'info');
+      },
+    }, '清空明细'),
+    h('span', { class: 'small muted' },
+      '可从 Excel 复制多行直接粘贴；在「料号」栏回车即自动带出型号 / 类别 / 品名 / 规格'),
+    fillHint,
+    lineStats,
+  ]);
+
+  const submitBar = h('div', { class: 'submit-bar' }, [
+    h('button', { class: 'btn btn--primary btn--lg', onclick: submitAll }, '提交登记'),
+    h('button', { class: 'btn', onclick: () => resetAll(false) }, '清空重填'),
+    submitInfo,
+  ]);
+
+  const tableCard = h('div', { class: 'card mt16' }, [
+    h('div', { class: 'card__head' }, [
+      h('div', { class: 'card__title' }, '产品明细'),
+      h('div', { class: 'card__hint' }, '一行 = 一只产品；检测信息请在「检测登记」中录入'),
+    ]),
+    lineToolbar,
+    tableHost,
+  ]);
+
+  content.replaceChildren(hero, camPanel, bannerHost, headerHost,
+    checkBannerHost, tableCard, submitBar);
+
+  /* ================= 整单信息表单 ================= */
+  const headerCtl = {};
+  let autoCarrier = '';        // 上一次由单号前缀自动填入的快递公司
+  let carrierHintEl = null;    // 快递公司字段下方的识别提示
+
+  function renderHeader() {
+    const secs = META.header_groups.map(g => {
+      const grid = h('div', {
+        class: 'grid ' + (g.fields.length >= 5 ? 'grid--4' : 'grid--3'),
+      }, g.fields.map(f => {
+        const ctl = buildControl(f);
+        headerCtl[f.name] = ctl;
+        const kids = [h('label', { class: 'field__label' }, f.label), ctl];
+        if (f.name === 'carrier') {
+          carrierHintEl = h('div', {
+            class: 'small muted',
+            style: { marginTop: '4px', minHeight: '17px', lineHeight: '17px' },
+          });
+          kids.push(carrierHintEl);
+        }
+        return h('div', { class: 'field', style: { marginBottom: '0' } }, kids);
+      }));
+      return section(g.title, null, grid, false);
+    });
+    headerHost.replaceChildren(h('div', { class: 'card' }, [
+      h('div', { class: 'card__head' }, [
+        h('div', { class: 'card__title' }, '整单信息'),
+        h('div', { class: 'card__hint' }, '填一次，作用于该快递单下的全部明细行'),
+      ]),
+      h('div', { class: 'card__body' }, secs),
+    ]));
+
+    headerCtl.return_date && headerCtl.return_date.setValue(today());
+    headerCtl.registrar && headerCtl.registrar.setValue(META.default_registrar);
+    // 快递单号变化时重新解析归属售后单号、查重，并识别快递公司
+    if (headerCtl.return_no) {
+      headerCtl.return_no.addEventListener('input', () => {
+        scheduleCheck();
+        syncCarrier();
+      });
+    }
+    scheduleCheck();
+    syncCarrier();
+    if (!headerCtl.return_no) {
+      scanInput.focus();
+    } else if (headerCtl.return_no.focus) {
+      headerCtl.return_no.focus();
+    }
+  }
+
+  /* ---------------- 快递公司：按单号前缀自动识别 ---------------- */
+
+  /** 按退回单号前缀识别快递公司。
+   *  仅在快递公司为空、或当前值是系统上次自动填入时才改写；
+   *  人工选择过则保留人工值，不再覆盖。 */
+  function syncCarrier() {
+    const ctl = headerCtl.carrier;
+    const rnCtl = headerCtl.return_no;
+    if (!ctl || !rnCtl) return;
+
+    const code = (rnCtl.getValue() || '').trim().toUpperCase();
+    const hit = code && CARRIER_RULES.find(
+      r => code.startsWith(String(r.prefix || '').toUpperCase()));
+    const guessed = hit ? hit.carrier : '';
+    const cur = ctl.getValue();
+
+    if (cur && cur !== autoCarrier) {
+      setCarrierHint('manual', cur);   // 人工已选，保留
+      return;
+    }
+    if (cur !== guessed) {
+      ctl.setValue(guessed);
+      header.carrier = guessed;
+      autoCarrier = guessed;
+    }
+    setCarrierHint(guessed ? 'auto' : (code ? 'unknown' : 'idle'), guessed);
+  }
+
+  function setCarrierHint(kind, carrier) {
+    if (!carrierHintEl) return;
+    const map = {
+      auto: ['✓ 已按单号前缀识别为' + carrier, 'var(--success)'],
+      unknown: ['单号为纯数字，无法自动识别，请手工选择', 'var(--warning)'],
+      manual: ['已手工选择：' + carrier, 'var(--text-secondary)'],
+      idle: ['', ''],
+    };
+    const [text, color] = map[kind] || map.idle;
+    carrierHintEl.textContent = text;
+    carrierHintEl.style.color = color || '';
+  }
+
+  /* ---------------- 单号解析与重复登记预检 ---------------- */
+
+  function collectHeader() {
+    const data = {};
+    Object.entries(headerCtl).forEach(([k, ctl]) => {
+      const v = ctl.getValue ? ctl.getValue() : '';
+      if (v !== '') data[k] = v;
+    });
+    return data;
+  }
+
+  function collectItems() {
+    return rows.map(r => {
+      const o = {};
+      Object.keys(r).forEach(k => {
+        if (k.startsWith('_')) return;
+        const v = r[k];
+        if (v !== null && v !== undefined && String(v).trim() !== '') {
+          o[k] = String(v).trim();
+        }
+      });
+      return o;
+    }).filter(o => o.product_code || o.product_model || o.material_no || o.product_name);
+  }
+
+  let checkTimer = null;
+  function scheduleCheck() {
+    clearTimeout(checkTimer);
+    checkTimer = setTimeout(() => runCheck(), 420);
+  }
+
+  /** 向后端预检：归属单号 + 重复登记 */
+  async function runCheck() {
+    const headerData = collectHeader();
+    const items = collectItems();
+    try {
+      const r = await api('/returns/check', {
+        method: 'POST', body: { header: headerData, items },
+      });
+      // 售后单号锁定显示，由后端决定（新单号 or 归入已有单）
+      if (headerCtl.order_no) headerCtl.order_no.setValue(r.order_no);
+      if (r.return_no || items.length) renderCheckBanner(r);
+      else checkBannerHost.replaceChildren();
+      return r;
+    } catch {
+      return null;   // 预检失败不阻断，提交时后端仍会兜底
+    }
+  }
+
+  function renderCheckBanner(r) {
+    if (r.has_duplicate) {
+      checkBannerHost.replaceChildren(h('div', { class: 'match-banner match-banner--danger mb16' }, [
+        h('span', { class: 'match-banner__icon' }, '⚠'),
+        h('div', {}, [
+          h('div', { style: { fontWeight: '600' } }, '检测到重复登记，无法提交'),
+          h('div', { class: 'small', style: { marginTop: '3px' } },
+            r.duplicates.map(d =>
+              `第 ${d.line} 行「${d.value}」已于 ${d.detail_key} 登记`).join('；')),
+        ]),
+      ]));
+      return;
+    }
+    if (r.continues_existing) {
+      checkBannerHost.replaceChildren(h('div', { class: 'match-banner match-banner--multi mb16' }, [
+        h('span', { class: 'match-banner__icon' }, '↩'),
+        h('div', {}, [
+          h('div', {}, ['快递单 ', h('b', { class: 'mono' }, r.return_no),
+            ' 已登记过，本次将补登至售后单 ',
+            h('b', { class: 'mono' }, r.order_no)]),
+          h('div', { class: 'small', style: { marginTop: '3px' } },
+            '行号自动续接，不会新建售后单'),
+        ]),
+      ]));
+      return;
+    }
+    checkBannerHost.replaceChildren(h('div', { class: 'match-banner match-banner--miss mb16' }, [
+      h('span', { class: 'match-banner__icon' }, '＋'),
+      h('div', {}, ['新快递单，将生成售后单 ',
+        h('b', { class: 'mono' }, r.order_no)]),
+    ]));
+  }
+
+  function showDuplicateAlert(chk) {
+    const m = openModal({
+      title: '无法提交：存在重复登记',
+      body: h('div', {}, [
+        h('div', { class: 'match-banner match-banner--danger mb12' }, [
+          h('span', { class: 'match-banner__icon' }, '⚠'),
+          h('div', {},
+            `快递单 ${chk.return_no || ''} 下已登记过相同产品，请修改后再提交。`),
+        ]),
+        h('table', { class: 'table table--compact' }, [
+          h('thead', {}, h('tr', {}, ['行号', '重复字段', '值', '已有记录']
+            .map(t => h('th', {}, t)))),
+          h('tbody', {}, chk.duplicates.map(d => h('tr', {}, [
+            h('td', {}, `第 ${d.line} 行`),
+            h('td', {}, d.field_label),
+            h('td', { class: 'mono' }, d.value),
+            h('td', { class: 'mono' }, d.detail_key),
+          ]))),
+        ]),
+        h('div', { class: 'small muted mt12' },
+          '若确为同型号的另一件产品，请把数量合并到已有记录，或修改产品编号加以区分。'),
+      ]),
+      footer: [h('button', { class: 'btn btn--primary', onclick: () => m.close() }, '我知道了')],
+    });
+    return m;
+  }
+
+  /* ================= 明细行表格 ================= */
+  function newRowObj(init = {}) {
+    rowSeq += 1;
+    const r = { _id: rowSeq, return_qty: 1 };
+    Object.assign(r, init);
+    return r;
+  }
+
+  function addRow(init = {}, opts = {}) {
+    const r = newRowObj(init);
+    // 产品编号自带生产年月（前 4 位 YYMM），新增行时立即解析。
+    // 放在这里而不是各个调用点，是为了覆盖全部入口：扫码新增、手工新增、
+    // 历史记录套用、Excel 粘贴新增行。「人工优先」保证不会覆盖已有值。
+    fillPeriod(r);
+    rows.push(r);
+    renderTable();
+    if (opts.focusField) focusCell(r._id, opts.focusField);
+    updateStats();
+    scheduleCheck();
+    return r;
+  }
+
+  function removeRow(id) {
+    const i = rows.findIndex(r => r._id === id);
+    if (i < 0) return;
+    rows.splice(i, 1);
+    renderTable();
+    updateStats();
+    scheduleCheck();
+  }
+
+  function focusCell(id, field) {
+    const el = tableHost.querySelector(`[data-row="${id}"][data-field="${field}"]`);
+    if (el) { el.focus(); el.select && el.select(); }
+  }
+
+  const COL_LABELS = META.field_labels || {};
+
+  function renderTable() {
+    if (!rows.length) {
+      tableHost.replaceChildren(h('div', { class: 'empty' }, [
+        h('div', { class: 'empty__icon' }, '▤'),
+        '还没有产品明细 —— 扫一个产品条码，或点「＋ 新增一行」',
+      ]));
+      updateStats();
+      return;
+    }
+
+    const cols = META.line_columns;
+    const thead = h('thead', {}, h('tr', {}, [
+      h('th', { style: { width: '38px' } }, '#'),
+      ...cols.map(c => h('th', {}, COL_LABELS[c] || c)),
+      h('th', { style: { width: '46px', textAlign: 'center' } }, '操作'),
+    ]));
+
+    const tbody = h('tbody', {});
+    rows.forEach((r, idx) => {
+      const tr = h('tr', {}, [
+        h('td', { class: 'line-fixed' }, String(idx + 1)),
+        ...cols.map(c => {
+          const f = LINE_FIELD_MAP[c] || { name: c, type: 'text' };
+          return h('td', {}, buildControl(f, { rowObj: r, compact: true }));
+        }),
+        h('td', {}, h('div', { class: 'row-actions' }, [
+          h('button', {
+            class: 'row-btn row-btn--danger', title: '删除该行',
+            onclick: () => removeRow(r._id),
+          }, '×'),
+        ])),
+      ]);
+
+      tbody.append(tr);
+    });
+
+    tableHost.replaceChildren(h('table', { class: 'line-table' }, [thead, tbody]));
+    updateStats();
+  }
+
+  function updateStats() {
+    const qty = rows.reduce((s, r) => s + (Number(r.return_qty) || 0), 0);
+    const filled = rows.filter(r => r.product_code || r.product_model || r.material_no).length;
+    lineStats.textContent = `${rows.length} 行产品 · ${filled} 行已填 · 合计退回 ${qty} 件`;
+    submitInfo.replaceChildren(
+      h('span', {}, '本次将提交 '),
+      h('b', {}, String(rows.length)),
+      h('span', {}, ' 条明细，行号在所选售后单号下自动递增'),
+    );
+  }
+
+  /* ================= Excel 粘贴 ================= */
+  tableHost.addEventListener('paste', e => {
+    const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+    if (!text || !/[\t\r\n]/.test(text)) return;      // 单值粘贴不拦截
+
+    const target = e.target;
+    const startRowId = Number(target.dataset.row);
+    const startField = target.dataset.field;
+    if (!startRowId || !startField) return;
+
+    const cols = META.line_columns;
+    let startCol = cols.indexOf(startField);
+    if (startCol < 0) startCol = 0;
+
+    const grid = text.replace(/\r/g, '').replace(/\n+$/, '')
+      .split('\n').map(line => line.split('\t'));
+    if (!grid.length) return;
+
+    e.preventDefault();
+    let startIdx = rows.findIndex(r => r._id === startRowId);
+    if (startIdx < 0) startIdx = rows.length;
+
+    let added = 0;
+    grid.forEach((cells, ri) => {
+      const rowIdx = startIdx + ri;
+      while (rows.length <= rowIdx) { rows.push(newRowObj()); added++; }
+      const r = rows[rowIdx];
+      cells.forEach((val, ci) => {
+        const colName = cols[startCol + ci];
+        if (!colName) return;
+        r[colName] = String(val).trim();
+      });
+    });
+
+    renderTable();
+    toast(`已粘贴 ${grid.length} 行${added ? `（新增 ${added} 行）` : ''}`, 'success');
+
+    // 粘贴内容若包含产品编号，逐行解析生产年月（本地完成，无请求）
+    const pi = cols.indexOf('product_code');
+    const pci = pi >= 0 ? pi - startCol : -1;
+    if (pci >= 0) {
+      let done = 0;
+      grid.forEach((cells, ri) => {
+        const r = rows[startIdx + ri];
+        if (!r) return;
+        const raw = pci < cells.length ? String(cells[pci] || '').trim() : '';
+        if (!raw) return;
+        r.product_code = raw;
+        if (fillPeriod(r).applied.length) done++;
+      });
+      if (done) toast(`已按产品编号识别 ${done} 行的生产年月`, 'success');
+    }
+
+    // 粘贴内容若包含料号，逐行自动补全产品属性
+    const mi = cols.indexOf('material_no');
+    const ci = mi >= 0 ? mi - startCol : -1;
+    if (ci >= 0) {
+      const targets = [];
+      grid.forEach((cells, ri) => {
+        const raw = ci < cells.length ? String(cells[ci] || '').trim() : '';
+        const r = rows[startIdx + ri];
+        if (raw && r) targets.push(r);
+      });
+      if (targets.length) refillRows(targets);
+    }
+  });
+
+  /* ================= 料号 → 产品属性自动回填 =================
+     明细行里手工输入或粘贴「料号」后，由匹配数据库带出产品型号 / 规格 /
+     品名 / 产品类别。刻意不含生产年份与生产月份 —— 匹配库没有这两个字段，
+     而历史同规格记录的年份跨批次并不一致（实测最多 6 种取值），
+     自动填入等于凭空造一个看似可信的错值。
+
+     触发方式用「事件委托」挂在表格容器上：行是动态增删的，
+     逐行绑监听会在每次重渲染后累积，是同类缺陷的高发点。 */
+
+  // 可被自动回填的字段
+  const FILL_TARGETS = ['material_no', 'product_model', 'spec', 'product_name',
+                        'product_category', 'production_stat'];
+
+  /**
+   * 通用「人工优先」写入：只填空格，或覆盖上一次由系统自动填入的值。
+   * 某格一旦被人工改过（当前值 ≠ 上次自动值），就永不改写。
+   * 返回实际发生改动的字段名数组。
+   */
+  function applyAutoValues(r, values) {
+    const applied = [];
+    const auto = r._auto || (r._auto = {});
+    Object.keys(values || {}).forEach(name => {
+      const next = String(values[name] ?? '').trim();
+      if (!next) return;
+      const cur = String(r[name] ?? '').trim();
+      const prevAuto = auto[name] || '';
+      if (cur && cur !== prevAuto) return;      // 人工填过 → 保留
+      if (cur === next) { auto[name] = next; return; }
+      r[name] = next;
+      auto[name] = next;
+      applied.push(name);
+    });
+    return applied;
+  }
+
+  const rowById = id => rows.find(r => r._id === Number(id));
+
+  /** 从单元格反查所属明细行：优先 data-row，缺失时按所在表格行的位置兜底。 */
+  function rowFromCell(el) {
+    const id = Number(el.dataset && el.dataset.row);
+    if (id) {
+      const r = rowById(id);
+      if (r) return r;
+    }
+    const tr = el.closest ? el.closest('tr') : null;
+    if (!tr) return null;
+    const list = Array.prototype.slice.call(tableHost.querySelectorAll('tbody tr'));
+    const idx = list.indexOf(tr);
+    return idx >= 0 ? (rows[idx] || null) : null;
+  }
+
+  function setFillHint(text, kind) {
+    fillHint.textContent = text || '';
+    fillHint.className = 'line-fill-hint' + (kind ? ' line-fill-hint--' + kind : '');
+  }
+
+  function cellEl(rowId, field) {
+    return tableHost.querySelector(`[data-row="${rowId}"][data-field="${field}"]`);
+  }
+
+  // 把回填结果画回单元格：值同步 + 短暂高亮
+  function paintFilled(r, names) {
+    names.forEach(name => {
+      const el = cellEl(r._id, name);
+      if (!el) return;
+      el.value = r[name] ?? '';
+      el.classList.add('cell-input--filled');
+      setTimeout(() => el.classList.remove('cell-input--filled'), 1800);
+    });
+    const codeEl = cellEl(r._id, 'material_no');
+    if (codeEl) codeEl.classList.remove('cell-input--miss');
+  }
+
+  function markCodeMiss(r) {
+    const el = cellEl(r._id, 'material_no');
+    if (!el) return;
+    el.classList.add('cell-input--miss');
+    el.title = '匹配数据库中没有这个料号，请手工填写产品信息';
+  }
+
+  /**
+   * 按料号回填一行，返回 { found, applied }。
+   * 「人工优先」：只填空格，或覆盖上一次由系统自动填入的值；
+   * 只要某格被人工改过（当前值 ≠ 上次自动值），就永不改写。
+   */
+  async function fillRow(r) {
+    const code = String(r.material_no || '').trim();
+    if (!code) return { found: false, applied: [] };
+    if (r._fillCode === code) return { found: !!r._fillFound, applied: [] };
+
+    let res;
+    try {
+      res = await api('/items/fill?code=' + encodeURIComponent(code));
+    } catch (e) {
+      return { found: false, applied: [] };
+    }
+    r._fillCode = code;
+    r._fillFound = !!res.found;
+
+    if (!res.found) {
+      // 清掉上一轮由系统自动填入的值 —— 它们基于另一个（错的）料号，
+      // 留着比空着更危险。人工填过的值照旧保留。
+      const auto = r._auto || {};
+      const cleared = [];
+      FILL_TARGETS.forEach(name => {
+        if (name === 'material_no') return;
+        const cur = String(r[name] ?? '').trim();
+        if (cur && cur === (auto[name] || '')) {
+          r[name] = '';
+          delete auto[name];
+          cleared.push(name);
+        }
+      });
+      if (cleared.length) paintFilled(r, cleared);
+      markCodeMiss(r);
+      return { found: false, applied: [], cleared: cleared.length };
+    }
+
+    const applied = applyAutoValues(r, res.suggest);
+    paintFilled(r, applied);
+    // 产品编号若已有值，顺带补一次生产年月
+    if (applied.length) fillPeriod(r);
+    return { found: true, applied };
+  }
+
+  // 批量补全（Excel 粘贴后），串行请求并显示进度
+  async function refillRows(list) {
+    const targets = list.filter(r => String(r.material_no || '').trim());
+    if (!targets.length) return;
+    let ok = 0, miss = 0;
+    for (let i = 0; i < targets.length; i++) {
+      setFillHint(`补全中 ${i + 1}/${targets.length}…`, 'busy');
+      const { found, applied } = await fillRow(targets[i]);
+      if (found) { ok++; if (applied.length) updateStats(); } else miss++;
+    }
+    setFillHint(`✓ 已补全 ${ok} 行${miss ? `，${miss} 行未匹配到料号` : ''}（共 ${targets.length} 行）`,
+      miss && !ok ? 'warn' : 'ok');
+    if (miss) toast(`${miss} 行的料号在匹配数据库中不存在，请手工填写`, 'warn');
+  }
+
+  /** 按料号回填一行并给出提示 —— 回车、失焦、选中候选三条路径共用 */
+  async function triggerMaterialFill(r) {
+    const code = String(r.material_no || '').trim();
+    if (!code) return;
+    const { found, applied } = await fillRow(r);
+    if (found) {
+      setFillHint(applied.length
+        ? `✓ 已按料号 ${code} 补全 ${applied.length} 项`
+        : `料号 ${code} 无新增项（已有值不会被覆盖）`, applied.length ? 'ok' : '');
+      updateStats();
+    } else {
+      setFillHint(`料号 ${code} 未匹配到物料主档`, 'warn');
+    }
+  }
+
+  // 回车 / 离开料号格触发 —— 扫码枪扫料号天然带回车
+  tableHost.addEventListener('keydown', async e => {
+    const el = e.target;
+    if (e.key !== 'Enter' || !el.dataset || el.dataset.field !== 'material_no') return;
+    // 可搜索下拉自己处理回车（选中候选或 onEnter）并已触发回填，避免重复
+    if (el.closest && el.closest('.cb')) return;
+    e.preventDefault();
+    const r = rowFromCell(el);
+    if (!r) return;
+    r.material_no = el.value.trim();
+    await triggerMaterialFill(r);
+  });
+
+  tableHost.addEventListener('focusout', e => {
+    const el = e.target;
+    if (!el.dataset || el.dataset.field !== 'material_no') return;
+    const r = rowFromCell(el);
+    if (!r) return;
+    r.material_no = el.value.trim();
+    fillRow(r);
+  });
+
+  /* ================= 产品编号 → 生产年月 =================
+     产品编号前 4 位就是生产年月（YYMM）：20100341 → 2020 年 10 月。
+     解析参数由 meta 下发，与后端 core/repository.parse_period_from_code
+     共用同一套规则，避免两边各写一份而漂移。
+
+     解析不出来时写「无法确认」而不是留空 —— 让「还没查」和
+     「查了但编号不规范」在数据上可区分，便于后续筛出来人工修正。 */
+
+  const PERIOD_RULE = META.period_rule
+    || { prefix_len: 4, century: 2000, month_suffix: '月', unknown: '无法确认' };
+
+  function parsePeriod(code) {
+    const text = String(code || '').trim();
+    if (!text) return {};                       // 无依据 → 不写占位
+    const n = PERIOD_RULE.prefix_len || 4;
+    const unknown = { production_year: PERIOD_RULE.unknown,
+                      production_month: PERIOD_RULE.unknown };
+    if (text.length < n) return unknown;
+    const head = text.slice(0, n);
+    if (!/^[0-9]+$/.test(head)) return unknown;
+    const month = Number(head.slice(2));
+    const year = (PERIOD_RULE.century || 2000) + Number(head.slice(0, 2));
+    if (!(month >= 1 && month <= 12)) return unknown;
+    const thisYear = new Date().getFullYear();
+    if (year < (PERIOD_RULE.century || 2000) || year > thisYear + 1) return unknown;
+    return { production_year: String(year),
+             production_month: month + (PERIOD_RULE.month_suffix || '月') };
+  }
+
+  /** 按产品编号补全生产年月。返回 { applied, ok }。 */
+  function fillPeriod(r) {
+    const code = String(r.product_code || '').trim();
+    if (!code) return { applied: [], ok: false };
+    const period = parsePeriod(code);
+    const applied = applyAutoValues(r, period);
+    if (applied.length) paintFilled(r, applied);
+    return { applied, ok: period.production_year !== PERIOD_RULE.unknown };
+  }
+
+  function periodHint(r, result) {
+    if (!String(r.product_code || '').trim()) return ['', ''];
+    if (result.ok) {
+      return [`✓ 已按产品编号识别生产年月：${r.production_year} ${r.production_month}`,
+              'ok'];
+    }
+    return [`产品编号 ${r.product_code} 前四位不符合「年月」格式，已标记为「${PERIOD_RULE.unknown}」`,
+            'warn'];
+  }
+
+  /** 按产品编号识别生产年月并给出提示 —— 回车、失焦、选中候选三条路径共用 */
+  function triggerPeriodFill(r) {
+    const result = fillPeriod(r);
+    const [text, kind] = periodHint(r, result);
+    if (text) setFillHint(text, kind);
+    updateStats();
+  }
+
+  // 产品编号格：回车 / 离开该格触发
+  tableHost.addEventListener('keydown', e => {
+    const el = e.target;
+    if (e.key !== 'Enter' || !el.dataset || el.dataset.field !== 'product_code') return;
+    // 可搜索下拉自己处理回车并已触发解析，避免重复
+    if (el.closest && el.closest('.cb')) return;
+    e.preventDefault();
+    const r = rowFromCell(el);
+    if (!r) return;
+    r.product_code = el.value.trim();
+    triggerPeriodFill(r);
+  });
+
+  tableHost.addEventListener('focusout', e => {
+    const el = e.target;
+    if (!el.dataset || el.dataset.field !== 'product_code') return;
+    const r = rowFromCell(el);
+    if (!r) return;
+    r.product_code = el.value.trim();
+    fillPeriod(r);
+  });
+
+  /* ================= 扫码匹配 ================= */
+  function setState(text, loading) {
+    stateLine.replaceChildren(
+      loading ? h('span', { class: 'spin' }) : null,
+      h('span', {}, text),
+    );
+  }
+  function setMode(text, cls) {
+    modeTag.className = 'tag ' + (cls || '');
+    modeTag.textContent = text;
+  }
+
+  let matchTimer = null;
+  scanInput.addEventListener('input', () => {
+    clearTimeout(matchTimer);
+    const v = scanInput.value.trim();
+    if (!v) { bannerHost.replaceChildren(); setState('等待输入…'); return; }
+    if (v.length < 4) { setState(`已输入 ${v.length} 位，继续…`); return; }
+    setState('匹配中…', true);
+    matchTimer = setTimeout(() => handleCode(v), 240);
+  });
+  scanInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      clearTimeout(matchTimer);
+      const v = scanInput.value.trim();
+      if (v) { lastCode = ''; handleCode(v); }
+    }
+  });
+
+  async function handleCode(code) {
+    if (!code) { toast('请输入或扫描条码', 'warn'); return; }
+    if (code === lastCode) return;
+    setState('匹配中…', true);
+
+    let res;
+    try {
+      res = await api('/scan/match', { method: 'POST', body: { code } });
+    } catch (e) {
+      setState('匹配失败：' + e.message);
+      toast('匹配失败：' + e.message, 'error');
+      return;
+    }
+    lastCode = code;
+    renderBanner(res);
+
+    const firstField = res.matches.length ? res.matches[0].field : null;
+
+    // 扫到快递单号：回填整单信息，不额外加行（除非当前一行都没有）
+    if (res.exact && firstField === 'return_no') {
+      if (!headerCtl.return_no.getValue()) headerCtl.return_no.setValue(code);
+      applyHeaderSuggest(res.suggest);
+      syncCarrier();
+      if (!rows.length) addRow({}, { focusField: 'product_code' });
+      setState(`✓ 命中退回单号，已回填整单信息（${res.matches[0].count} 条历史）`);
+      setMode('已匹配', 'tag--success');
+      toast('命中退回单号，整单信息已回填', 'success');
+      return;
+    }
+
+    // 其余条码：新增一行产品并回填
+    const init = {};
+    if (res.suggest) {
+      Object.entries(res.suggest).forEach(([k, v]) => {
+        if (!k.startsWith('_') && LINE_FIELD_MAP[k]) init[k] = v;
+      });
+    }
+    if (!init.product_code && !init.material_no && !init.product_model) {
+      init.product_code = code;
+    }
+    addRow(init);
+
+    if (res.exact) {
+      setState(`✓ 命中「${res.matches[0].field_label}」，已新增一行并回填`);
+      setMode('已匹配', 'tag--success');
+      toast(`匹配成功：${res.matches[0].field_label}，已新增一行`, 'success');
+    } else if (res.fuzzy) {
+      setState(`≈ 未精确匹配，按相似记录新增一行（${res.matches[0].count} 条）`);
+      setMode('模糊匹配', 'tag--warning');
+    } else if (res.suggest && res.suggest._source === 'model_dict') {
+      setState('○ 历史无记录，已按型号字典新增一行');
+      setMode('字典命中', 'tag--info');
+    } else {
+      setState('○ 无历史记录，已新增空白行，请手工补全');
+      setMode('新件', '');
+    }
+  }
+
+  function applyHeaderSuggest(suggest) {
+    if (!suggest) return;
+    ['turbine_vendor', 'project_site', 'carrier', 'info_source'].forEach(k => {
+      const v = suggest[k];
+      if (!v) return;
+      const ctl = headerCtl[k];
+      if (ctl && !ctl.getValue()) ctl.setValue(v);
+    });
+  }
+
+  function renderBanner(res) {
+    bannerHost.replaceChildren();
+    if (!res.matches.length) {
+      bannerHost.appendChild(h('div', { class: 'match-banner match-banner--miss mb16' }, [
+        h('span', { class: 'match-banner__icon' }, '○'),
+        h('div', {}, [
+          h('div', {}, res.suggest && res.suggest._source === 'model_dict'
+            ? '历史库无此条码，已按型号字典回填产品信息'
+            : '历史库中无此条码，已新增空白行，请手工补全'),
+          h('div', { class: 'small muted mt8' },
+            `条码 ${res.code}　·　检索字段：退回单号 / 产品编号 / 料号 / 售后单号 / 产品型号`),
+        ]),
+      ]));
+      return;
+    }
+
+    const first = res.matches[0];
+    const cls = res.exact ? 'match-banner--hit' : 'match-banner--multi';
+    const banner = h('div', { class: `match-banner ${cls} mb16` }, [
+      h('span', { class: 'match-banner__icon' }, res.exact ? '✓' : '≈'),
+      h('div', { style: { flex: '1' } }, [
+        h('div', {}, [
+          res.exact ? '精确命中' : '模糊命中',
+          `「${first.field_label}」`,
+          h('span', { class: 'mono', style: { marginLeft: '6px' } }, res.code),
+        ]),
+        h('div', { class: 'small', style: { marginTop: '3px' } },
+          `共 ${first.count} 条历史记录；产品信息已填入新行`),
+      ]),
+      h('button', {
+        class: 'btn btn--sm', style: { flexShrink: '0' },
+        onclick: () => openHistory(res),
+      }, '查看历史'),
+    ]);
+    bannerHost.appendChild(banner);
+  }
+
+  function openHistory(res) {
+    const first = res.matches[0];
+    const list = first.records.map(rec => h('div', {
+      class: 'cand',
+      onclick: () => {
+        const init = {};
+        Object.entries(rec).forEach(([k, v]) => {
+          if (LINE_FIELD_MAP[k] && v !== null && v !== '' && k !== 'return_qty') init[k] = v;
+        });
+        addRow(init);
+        toast('已套用 ' + (rec.detail_key || ''), 'success');
+        m.close();
+      },
+    }, [
+      h('span', { class: 'tag tag--brand mono' }, rec.detail_key || ''),
+      h('div', { style: { flex: '1', minWidth: '0' } }, [
+        h('div', { style: { fontWeight: '500' } }, rec.product_model || rec.product_name || '—'),
+        h('div', { class: 'small muted' },
+          [rec.turbine_vendor, rec.project_site, fmtDate(rec.return_date), rec.feedback_issue]
+            .filter(Boolean).join(' · ')),
+      ]),
+      h('span', { class: 'tag' }, '套用为新行'),
+    ]));
+
+    const m = openModal({
+      title: `匹配到 ${first.count} 条历史记录`,
+      body: h('div', {}, [
+        h('div', { class: 'small muted mb12' },
+          `命中字段：${first.field_label}　·　条码：${res.code}。点击任意记录可将其产品信息追加为新行。`),
+        h('div', { class: 'cand-list' }, list),
+      ]),
+    });
+  }
+
+  /* ================= 摄像头 ================= */
+  async function toggleCamera() {
+    if (camReader) { stopCamera(); return; }
+    if (window.__zxing_failed || typeof ZXing === 'undefined') {
+      toast('扫码组件未加载，请刷新页面或改用扫码枪', 'warn');
+      return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      toast('当前环境不支持摄像头（需通过 127.0.0.1 或 HTTPS 访问）', 'warn');
+      return;
+    }
+    try {
+      camPanel.classList.remove('hidden');
+      camBtn.textContent = '停止摄像头';
+      camBtn.classList.add('is-active');
+      camReader = new ZXing.BrowserMultiFormatReader();
+      camReader.decodeFromVideoDevice(null, video, result => {
+        if (result) {
+          const text = result.getText();
+          stopCamera();
+          lastCode = '';
+          handleCode(text);
+          toast('摄像头识别成功：' + text, 'success');
+        }
+      });
+    } catch (e) {
+      toast('无法启用摄像头：' + e.message, 'error');
+      stopCamera();
+    }
+  }
+  function stopCamera() {
+    try { if (camReader) camReader.reset(); } catch { /* ignore */ }
+    camReader = null;
+    camPanel.classList.add('hidden');
+    camBtn.textContent = '摄像头扫码';
+    camBtn.classList.remove('is-active');
+  }
+
+  /* ================= 提交 ================= */
+  async function submitAll() {
+    const headerData = collectHeader();
+    const items = collectItems();
+
+    if (!items.length) {
+      toast('请至少录入一行有效产品（产品编号 / 型号 / 料号 / 品名）', 'warn');
+      return;
+    }
+    if (!headerData.return_no) {
+      toast('请先扫描或填写退回单号（快递单号）', 'warn');
+      if (headerCtl.return_no && headerCtl.return_no.focus) headerCtl.return_no.focus();
+      return;
+    }
+
+    const btn = submitBar.querySelector('button');
+    btn.disabled = true; btn.textContent = '校验中…';
+
+    // 提交前最后一道查重，命中则直接拦截
+    let chk = null;
+    try {
+      chk = await api('/returns/check', {
+        method: 'POST', body: { header: headerData, items },
+      });
+    } catch { /* 预检失败不阻断，后端仍会兜底 */ }
+
+    if (chk && chk.has_duplicate) {
+      btn.disabled = false; btn.textContent = '提交登记';
+      renderCheckBanner(chk);
+      showDuplicateAlert(chk);
+      toast('存在重复登记，已阻止提交', 'error', 4200);
+      return;
+    }
+
+    btn.textContent = '提交中…';
+    try {
+      const res = await api('/returns/batch', {
+        method: 'POST', body: { header: headerData, items },
+      });
+      DictCache.invalidate();
+      DICT = await loadDictMap(DICT_FIELDS);
+      refreshComboboxOptions();
+      await showSuccess(res, headerData);
+      resetAll(false);
+    } catch (e) {
+      if (e.status === 409 && e.detail && e.detail.duplicates) {
+        const info = {
+          return_no: headerData.return_no,
+          duplicates: e.detail.duplicates,
+          has_duplicate: true,
+        };
+        renderCheckBanner(info);
+        showDuplicateAlert(info);
+        toast('存在重复登记，已阻止提交', 'error', 4200);
+      } else {
+        toast('提交失败：' + e.message, 'error');
+      }
+    } finally {
+      btn.disabled = false; btn.textContent = '提交登记';
+    }
+  }
+
+  function refreshComboboxOptions() {
+    Object.values(headerCtl).forEach(ctl => {
+      if (ctl && ctl.setOptions && ctl.name) ctl.setOptions(DICT[ctl.name] || []);
+    });
+  }
+
+  function showSuccess(res, headerData) {
+    return new Promise(resolve => {
+      const m = openModal({
+        title: '登记成功',
+        onClose: resolve,
+        body: h('div', {}, [
+          h('div', { class: 'match-banner match-banner--hit mb12' }, [
+            h('span', { class: 'match-banner__icon' }, '✓'),
+            h('div', {},
+              `已写入 ${res.count} 条产品明细，待同步队列 +${res.count}`),
+          ]),
+          h('table', { class: 'table table--compact' }, h('tbody', {}, [
+            h('tr', {}, [
+              h('td', { style: { width: '110px', color: '#5b6472' } }, '售后单号'),
+              h('td', { class: 'mono' }, res.order_no + (res.is_new_order ? '（新建）' : '（续接）')),
+            ]),
+            h('tr', {}, [
+              h('td', { style: { color: '#5b6472' } }, '明细唯一键'),
+              h('td', { class: 'mono' }, res.detail_keys.join('、')),
+            ]),
+            h('tr', {}, [
+              h('td', { style: { color: '#5b6472' } }, '退回单号'),
+              h('td', { class: 'mono' }, headerData.return_no || '—'),
+            ]),
+            h('tr', {}, [
+              h('td', { style: { color: '#5b6472' } }, '登记时间'),
+              h('td', {}, res.registered_at),
+            ]),
+          ])),
+        ]),
+        footer: [
+          h('button', {
+            class: 'btn',
+            onclick: () => {
+              m.close();
+              location.href = '/query.html?kw=' + encodeURIComponent(res.detail_keys[0]);
+            },
+          }, '查看这些记录'),
+          h('button', { class: 'btn btn--primary', onclick: () => m.close() }, '继续登记'),
+        ],
+      });
+      setTimeout(() => m.close(), 3600);
+    });
+  }
+
+  /* ================= 重置 ================= */
+  function resetAll(focus) {
+    Object.keys(headerCtl).forEach(k => {
+      const ctl = headerCtl[k];
+      if (!ctl.setValue) return;
+      if (k === 'return_date') ctl.setValue(today());
+      else if (k === 'registrar') ctl.setValue(META.default_registrar);
+      else ctl.setValue('');
+    });
+    rows = [];
+    renderTable();
+    bannerHost.replaceChildren();
+    scanInput.value = '';
+    lastCode = '';
+    autoCarrier = '';
+    setState('等待输入…');
+    setMode('待扫描', 'tag--brand');
+    scheduleCheck();
+    syncCarrier();
+    if (focus) {
+      if (headerCtl.return_no && headerCtl.return_no.focus) headerCtl.return_no.focus();
+      toast('已清空，可开始新的快递单', 'info');
+    }
+  }
+
+  /* ================= 全局扫码枪 ================= */
+  attachScanner(code => {
+    scanInput.value = code;
+    lastCode = '';
+    handleCode(code);
+  });
+  document.addEventListener('click', e => {
+    const tag = (e.target.tagName || '').toUpperCase();
+    if (['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'A'].includes(tag)) return;
+    if (e.target.closest && e.target.closest('.cb')) return;
+    scanInput.focus();
+  });
+
+  /* ================= 启动 ================= */
+  // 首屏渲染必须放在最后：renderHeader 内部会调用 scheduleCheck / syncCarrier，
+  // 而这些函数依赖本文件中后置声明的变量（如 checkTimer）。提前调用会触发
+  // TDZ 错误并中断整个 IIFE，导致后续所有 const/let 失效、明细表格无法渲染。
+  renderHeader();
+  scanInput.focus();
+  setState('等待输入…');
+  updateStats();
+})();
+</script>
+</body>
+</html>
