@@ -1,0 +1,829 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>发货跟踪 · 售后返件登记系统</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260923b">
+  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260923b">
+<link rel="stylesheet" href="/static/assets/app.css?v=20260923b">
+<style>
+  /* ================= 页面专属样式（只服务发货跟踪页）================= */
+  .dlvt-sum { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .dlvt-sum__item { display: flex; align-items: baseline; gap: 5px; }
+  .dlvt-sum__n { font-size: 19px; font-weight: 650; color: var(--text-primary); line-height: 1; }
+  .dlvt-sum__n.warn { color: var(--danger); }
+  .dlvt-sum__k { font-size: 12px; color: var(--text-tertiary); }
+  .dlvt-sum__sep { width: 1px; height: 22px; background: var(--border); }
+
+  .dlvt-chk { display: inline-flex; align-items: center; gap: 6px;
+    font-size: 13px; color: var(--text-secondary); cursor: pointer;
+    user-select: none; white-space: nowrap; }
+  .dlvt-chk input { width: 14px; height: 14px; cursor: pointer; }
+
+  table.dlvt-t { min-width: 1240px; }
+  table.dlvt-t th { white-space: nowrap; }
+  table.dlvt-t td { vertical-align: middle; }
+  table.dlvt-t td.ck, table.dlvt-t th.ck { width: 34px; text-align: center; }
+  table.dlvt-t td.ck input { width: 14px; height: 14px; cursor: pointer; }
+  table.dlvt-t tr.picked { background: #f7fbff; }
+  table.dlvt-t td.acts { white-space: nowrap; }
+  .dlvt-unlinked {
+    font-size: 10.5px; font-weight: 600; color: var(--warning);
+    background: #fff8e6; border: 1px solid #f0dcae;
+    border-radius: 3px; padding: 0 4px; line-height: 16px;
+  }
+  /* 三种行态（待发货 / 已发货 / 未关联）—— 2026-09-21 改版后列表里同时有这三种行，
+     颜色要和台账页、清单页的语义保持一致：橙=待办，绿=做完，红=要人处理。 */
+  .dlvt-state {
+    display: inline-block; font-size: 11px; font-weight: 600;
+    border-radius: 3px; padding: 1px 6px; line-height: 17px; white-space: nowrap;
+  }
+  .dlvt-state--pending { color: #8a5a00; background: #fff4e0; border: 1px solid #f0d9ae; }
+  .dlvt-state--shipped { color: #0b6b4f; background: #e6f7f0; border: 1px solid #b9e3d3; }
+  .dlvt-state--unlinked { color: #9a3412; background: #fdeee7; border: 1px solid #f5c8b3; }
+  /* 登记弹窗里的「要登记的申请明细」只读区 */
+  .dlvt-info {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 7px 18px;
+    font-size: 13px; background: var(--bg-subtle);
+    border-radius: var(--radius); padding: 10px 12px;
+  }
+  .dlvt-info__k { color: var(--text-tertiary); font-size: 12px; margin-right: 6px; }
+  table.dlvt-t tr.row-pending { background: #fffdf6; }
+  .dlvt-bar {
+    display: none; align-items: center; gap: 12px; flex-wrap: wrap;
+    margin-bottom: 10px; padding: 8px 12px; border-radius: var(--radius);
+    background: #eef6ff; border: 1px solid #cfe3fb; font-size: 13px;
+  }
+  .dlvt-bar.on { display: flex; }
+  .dlvt-bar b { color: var(--brand); }
+
+  .dlvt-sec__title {
+    font-size: 12.5px; font-weight: 600; color: var(--text-secondary);
+    margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+  }
+  .dlv-err {
+    display: none; margin-bottom: 12px; padding: 9px 12px; border-radius: var(--radius);
+    background: var(--danger-light); border: 1px solid #f3c2c2; color: var(--danger);
+    font-size: 12.5px; line-height: 1.8;
+  }
+  .dlv-err.on { display: block; }
+  .dlvt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 18px; }
+  .dlvt-grid .field--full { grid-column: 1 / -1; }
+  @media (max-width: 900px) { .dlvt-grid { grid-template-columns: 1fr; } }
+  .dlvt-paste {
+    width: 100%; min-height: 150px; font-family: var(--font-mono); font-size: 12px;
+    line-height: 1.7; white-space: pre; overflow-wrap: normal; overflow-x: auto;
+  }
+  .dlvt-res { font-size: 13px; line-height: 1.9; }
+  .dlvt-res h4 { margin: 0 0 8px; font-size: 13px; }
+  .dlvt-res__ok { color: var(--success); }
+  .dlvt-res__no { color: var(--danger); }
+  .dlvt-res ul { margin: 4px 0 14px; padding-left: 20px; }
+  .dlvt-detail { font-size: 13px; }
+  .dlvt-detail table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .dlvt-detail th { background: var(--bg-subtle); color: var(--text-secondary);
+    font-weight: 600; font-size: 11.5px; padding: 6px 8px; text-align: left;
+    white-space: nowrap; border-bottom: 1px solid var(--border); }
+  .dlvt-detail td { padding: 5px 8px; border-bottom: 1px solid var(--border); }
+  .dlvt-detail .mono { font-family: var(--font-mono); font-size: 11.5px; }
+</style>
+</head>
+<body>
+<script src="/static/assets/common.js?v=20260923b"></script>
+<script>
+(async () => {
+  const countTag = h('span', { class: 'tag' }, '— 条');
+  const content = await mountLayout('delivery-track', '发货跟踪',
+    '申请单一**提交**就出现在这里（状态「待发货」）；发货员在 ERP 做完发货单后，'
+    + '回到本页**按行登记**发货单号 —— 整单明细都登记完，申请单自动转「已发货」',
+    [countTag]);
+
+  let META = { ship_sources: [], field_labels: {}, ledger_dimensions: [] };
+  try {
+    META = await api('/delivery/meta');
+  } catch (e) {
+    content.replaceChildren(h('div', { class: 'empty' }, '加载失败：' + e.message));
+    return;
+  }
+  let DICT = {};
+  try {
+    DICT = await loadDictMap(['turbine_vendor', 'project_site']);
+  } catch { DICT = {}; }
+
+  const canWrite = () => hasPerm('act.delivery_ship');
+
+  /* ================= 列表状态 ================= */
+  let listRows = [];
+  let total = 0;
+  let page = 1;
+  let summary = { pending_lines: 0, shipped_lines: 0, unlinked: 0,
+                  pending_qty: 0, shipped_qty: 0, return_qty: 0, orders: 0 };
+  let keyword = '';
+  let fSource = '';
+  let fState = '';          // '' | pending | shipped | unlinked
+  let dateFrom = '';
+  let dateTo = '';
+  let onlyReturn = false;
+  const PAGE_SIZE = 20;
+  // 勾选存的是 **row_key** 而不是记录 id：待发货的行还没有发货记录（id 为空），
+  // 但也要能参与统一的选择/清空逻辑。挂接时再映射回 ship_id。
+  let selected = new Set();
+
+  function buildQuery(params) {
+    const sp = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v === null || v === undefined || v === '' || v === false) return;
+      sp.append(k, v === true ? '1' : v);
+    });
+    return sp.toString();
+  }
+  const resetSelection = () => { selected = new Set(); };
+
+  /* ================= 汇总条 ================= */
+  const sumBox = h('div', { class: 'dlvt-sum' });
+  function renderSummary() {
+    const mk = (n, k, warn) => h('div', { class: 'dlvt-sum__item' }, [
+      h('span', { class: 'dlvt-sum__n' + (warn && n ? ' warn' : '') }, String(n)),
+      h('span', { class: 'dlvt-sum__k' }, k),
+    ]);
+    // ★ 2026-09-21 改版：汇总要同时回答「还差多少没发」和「已经发了多少」——
+    //   改版前列的只有「发货」一侧，因为列表里本来就只有发货记录。
+    sumBox.replaceChildren(
+      mk(summary.pending_lines, '行待发货', true),
+      h('div', { class: 'dlvt-sum__sep' }),
+      mk(summary.pending_qty, '件待发'),
+      h('div', { class: 'dlvt-sum__sep' }),
+      mk(summary.shipped_lines, '行已发货'),
+      h('div', { class: 'dlvt-sum__sep' }),
+      mk(summary.shipped_qty, '件已发'),
+      h('div', { class: 'dlvt-sum__sep' }),
+      mk(summary.return_qty, '件需返回'),
+      h('div', { class: 'dlvt-sum__sep' }),
+      mk(summary.unlinked, '条未关联', true),
+    );
+  }
+  renderSummary();
+
+  /* ================= 筛选区 ================= */
+  const kwInput = h('input', {
+    class: 'input', type: 'text', style: { width: '210px' },
+    placeholder: '发货单号 / 物流单号 / 申请单号 / 型号…',
+  });
+  let kwTimer = null;
+  kwInput.addEventListener('input', () => {
+    clearTimeout(kwTimer);
+    kwTimer = setTimeout(() => {
+      keyword = kwInput.value.trim(); page = 1; resetSelection(); loadList();
+    }, 320);
+  });
+
+  const sourceSel = fixedSelect({
+    name: 'source_filter', value: '', placeholder: null,
+    options: [{ value: '', label: '全部来源' }]
+      .concat((META.ship_sources || []).map(x => ({ value: x.value, label: x.label }))),
+    onChange: v => { fSource = v; page = 1; resetSelection(); loadList(); },
+  });
+
+  const fromInput = h('input', { class: 'input', type: 'date', style: { width: '140px' } });
+  const toInput = h('input', { class: 'input', type: 'date', style: { width: '140px' } });
+  [fromInput, toInput].forEach((el, i) => {
+    el.addEventListener('change', () => {
+      if (i === 0) dateFrom = el.value; else dateTo = el.value;
+      page = 1; resetSelection(); loadList();
+    });
+  });
+
+  // 状态筛选：改版后列表里同时有三种行，用下拉比勾选框清楚
+  //（原来的「只看未关联」勾选就是它的一个取值）。
+  const stateSel = fixedSelect({
+    name: 'state_filter', value: '', placeholder: null,
+    options: [
+      { value: '', label: '全部状态' },
+      { value: 'pending', label: '待发货' },
+      { value: 'shipped', label: '已发货' },
+      { value: 'unlinked', label: '未关联' },
+    ],
+    onChange: v => { fState = v; page = 1; resetSelection(); loadList(); },
+  });
+
+  const returnChk = h('input', { type: 'checkbox' });
+  returnChk.addEventListener('change', () => {
+    onlyReturn = returnChk.checked; page = 1; resetSelection(); loadList();
+  });
+
+  const listHost = h('div', { class: 'table-wrap' });
+  const pagerBox = h('div', { class: 'pager' });
+  const bulkBar = h('div', { class: 'dlvt-bar' });
+  const bulkCount = h('span');
+  const linkBtn = h('button', {
+    class: 'btn btn--primary btn--sm',
+    onclick: () => openLinkDialog(selectedShipIds()),
+  }, '挂接到申请单');
+  const clearSelBtn = h('button', {
+    class: 'btn btn--sm', onclick: () => { resetSelection(); renderList(); },
+  }, '取消选择');
+  bulkBar.replaceChildren(bulkCount, linkBtn, clearSelBtn);
+
+  // ⚠️ 2026-09-21：原「＋ 登记发货」（不走申请单的手工登记）**已移除** ——
+  //   发货记录必须挂在申请明细的某一行上（发货跟踪以申请明细为主体）。
+  //   不走申请单的补发走「批量导入」，导入后可在列表里「挂接」到申请单。
+  const importBtn = h('button', {
+    class: 'btn', onclick: () => openImportDialog(),
+  }, '批量导入');
+  importBtn.style.display = canWrite() ? '' : 'none';
+
+  const filterCard = h('div', { class: 'card mb16' }, [
+    h('div', { class: 'card__body' }, [
+      h('div', { class: 'inspect-toolbar' }, [
+        kwInput, stateSel, sourceSel,
+        h('span', { class: 'small muted' }, '日期'),
+        fromInput, h('span', { class: 'muted' }, '~'), toInput,
+        h('label', { class: 'dlvt-chk' }, [returnChk, h('span', {}, '只看需返回')]),
+        h('div', { class: 'inspect-toolbar__spacer' }),
+        importBtn,
+        h('button', { class: 'btn btn--sm', onclick: () => loadList() }, '刷新'),
+      ]),
+    ]),
+  ]);
+
+  const listCard = h('div', { class: 'card' }, [
+    h('div', { class: 'card__head' }, [
+      h('div', { class: 'card__title' }, '发货跟踪'),
+      h('div', { class: 'card__hint' },
+        '一行 = 申请单里的一个产品明细。**待发货**的行请点「登记发货」填 ERP 单号；'
+        + '**未关联**的行（导入来的、对不上申请单）勾选后挂接'),
+    ]),
+    h('div', { class: 'card__body' }, [sumBox, h('div', { style: { height: '12px' } }),
+      bulkBar, listHost, pagerBox]),
+  ]);
+
+  content.replaceChildren(filterCard, listCard);
+
+  /* ================= 数据加载 ================= */
+  async function loadList() {
+    const params = { page, page_size: PAGE_SIZE };
+    if (keyword) params.keyword = keyword;
+    if (fState) params.state = fState;
+    if (fSource) params.source = fSource;
+    if (dateFrom) params.date_from = dateFrom;
+    if (dateTo) params.date_to = dateTo;
+    if (onlyReturn) params.only_return = 1;
+
+    listHost.replaceChildren(h('div', { class: 'empty' }, '加载中…'));
+    let res;
+    try {
+      res = await api('/delivery/shipments?' + buildQuery(params));
+    } catch (e) {
+      listHost.replaceChildren(h('div', { class: 'empty' }, '加载失败：' + e.message));
+      return;
+    }
+    listRows = res.rows || [];
+    total = res.total || 0;
+    summary = res.summary || summary;
+    renderSummary();
+    renderList();
+    renderPager();
+    countTag.textContent = `${total} 条`;
+    countTag.className = 'tag' + (total ? ' tag--brand' : '');
+  }
+
+  function renderPager() {
+    const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    if (pages <= 1) { pagerBox.replaceChildren(); return; }
+    pagerBox.replaceChildren(
+      h('button', {
+        class: 'btn btn--sm', disabled: page <= 1,
+        onclick: () => { page -= 1; resetSelection(); loadList(); },
+      }, '上一页'),
+      h('span', { class: 'small muted', style: { padding: '0 6px' } }, `${page} / ${pages}`),
+      h('button', {
+        class: 'btn btn--sm', disabled: page >= pages,
+        onclick: () => { page += 1; resetSelection(); loadList(); },
+      }, '下一页'),
+    );
+  }
+
+  function renderBulkBar() {
+    if (!selected.size || !canWrite()) { bulkBar.className = 'dlvt-bar'; return; }
+    bulkBar.className = 'dlvt-bar on';
+    bulkCount.replaceChildren('已选 ', h('b', {}, String(selected.size)), ' 条');
+  }
+
+  function renderList() {
+    renderBulkBar();
+    if (!listRows.length) {
+      const hasFilter = keyword || fState || fSource || dateFrom || dateTo
+        || onlyReturn;
+      listHost.replaceChildren(h('div', { class: 'empty' },
+        hasFilter ? '没有符合条件的记录'
+          : '还没有发货跟踪记录 —— 到「发货申请」提交一张申请单，'
+            + '它就会出现在这里（状态「待发货」）'));
+      return;
+    }
+
+    /* 勾选框**只对「未关联」的行开放** —— 那是唯一需要"选多行一起挂接"的场景。
+       待发货 / 已发货的行勾了也没有批量动作可做，开放勾选只会让人以为漏了什么。 */
+    const cands = listRows.filter(r => r.state === 'unlinked');
+    const allChk = h('input', { type: 'checkbox' });
+    allChk.disabled = !canWrite() || !cands.length;
+    allChk.addEventListener('change', () => {
+      cands.forEach(r => {
+        if (allChk.checked) selected.add(r.row_key);
+        else selected.delete(r.row_key);
+      });
+      renderList();
+    });
+    allChk.checked = !!cands.length && cands.every(r => selected.has(r.row_key));
+    allChk.indeterminate = !allChk.checked
+      && cands.some(r => selected.has(r.row_key));
+
+    const cols = ['', '状态', '申请单号', '行', '整机厂家', '项目风场',
+      '产品型号', '料号', '申请', '实发', '发货单号', '发货日期', '物流单号',
+      '来源', '操作'];
+    const thead = h('thead', {}, h('tr', {}, cols.map((c, i) =>
+      i === 0 ? h('th', { class: 'ck' }, allChk) : h('th', {}, c))));
+
+    const tbody = h('tbody', {}, listRows.map(r => {
+      const canPick = canWrite() && r.state === 'unlinked';
+      const ck = h('input', { type: 'checkbox' });
+      ck.checked = canPick && selected.has(r.row_key);
+      ck.disabled = !canPick;
+      if (canPick) {
+        ck.addEventListener('change', () => {
+          if (ck.checked) selected.add(r.row_key); else selected.delete(r.row_key);
+          const tr = ck.closest('tr');
+          if (tr) tr.className = ck.checked ? 'picked' : 'row-' + r.state;
+          renderBulkBar();
+        });
+      }
+      return h('tr', { class: ck.checked ? 'picked' : 'row-' + r.state }, [
+        h('td', { class: 'ck' }, ck),
+        h('td', {}, h('span', { class: 'dlvt-state dlvt-state--' + r.state },
+                      r.state_label)),
+        h('td', {}, r.request_no
+          ? h('span', { class: 'mono' }, r.request_no)
+          : h('span', { class: 'dlvt-unlinked' }, '未关联')),
+        h('td', {}, (r.line_no === null || r.line_no === undefined)
+          ? '—' : String(r.line_no)),
+        h('td', {}, r.turbine_vendor || '—'),
+        h('td', {}, r.project_site || '—'),
+        h('td', {}, r.product_model || '—'),
+        h('td', { class: 'mono' }, r.material_no || '—'),
+        h('td', {}, r.state === 'unlinked' ? '—' : String(r.apply_qty || 0)),
+        h('td', {}, r.ship_qty ? String(r.ship_qty) : '—'),
+        h('td', { class: 'mono' }, r.ship_no || '—'),
+        h('td', { class: 'mono' }, r.ship_date || '—'),
+        h('td', { class: 'mono' }, r.express_no || '—'),
+        h('td', {}, r.source_label || '—'),
+        h('td', { class: 'acts' }, rowActions(r)),
+      ]);
+    }));
+    listHost.replaceChildren(h('table', { class: 'table table--compact dlvt-t' },
+      [thead, tbody]));
+  }
+
+  /** 每行的动作 —— 按行态只给**对该行态有意义**的动作。
+   *  三种行态的动作互不重叠：待发货只能登记，已发货只能改/撤，未关联只能挂/删。 */
+  function rowActions(r) {
+    if (!canWrite()) return [];
+    if (r.state === 'pending') {
+      return [h('button', {
+        class: 'btn btn--sm btn--primary',
+        onclick: () => openRegisterDialog(r, false),
+      }, '登记发货')];
+    }
+    if (r.state === 'shipped') {
+      return [
+        h('button', {
+          class: 'btn btn--sm', onclick: () => openRegisterDialog(r, true),
+        }, '修改'),
+        h('button', {
+          class: 'btn btn--sm btn--danger', style: { marginLeft: '5px' },
+          onclick: () => revokeRow(r),
+        }, '撤销登记'),
+      ];
+    }
+    return [
+      h('button', {
+        class: 'btn btn--sm', onclick: () => openLinkDialog([r.ship_id]),
+      }, '挂接'),
+      h('button', {
+        class: 'btn btn--sm btn--danger', style: { marginLeft: '5px' },
+        onclick: () => removeRow(r),
+      }, '删除'),
+    ];
+  }
+
+  /** 选中的行 → 发货记录 id（只有「未关联」的行才有 id）。 */
+  function selectedShipIds() {
+    return listRows
+      .filter(r => selected.has(r.row_key) && r.ship_id)
+      .map(r => r.ship_id);
+  }
+
+  /** 撤销某一行已登记的发货（退回「待发货」）。 */
+  async function revokeRow(r) {
+    const yes = await confirmDialog(
+      `确定撤销第 ${r.line_no} 行的发货登记吗？<br>`
+      + `<span class="mono">${escapeHtml(r.ship_no || '（无单号）')}</span>`
+      + ` · ${escapeHtml(r.product_model || '')} · ${r.ship_qty || 0} 件<br>`
+      + '撤销后这一行回到「待发货」，台账上的发货量会相应减少。',
+      { title: '撤销登记', danger: true });
+    if (!yes) return;
+    try {
+      await api('/delivery/shipments/' + r.ship_id, { method: 'DELETE' });
+      toast('已撤销登记，该行回到待发货', 'success');
+      resetSelection();
+      loadList();
+    } catch (e) {
+      toast('撤销失败：' + apiErr(e), 'error');
+    }
+  }
+
+  /** 删除一条**未关联**的发货记录（导入进来的孤儿记录）。
+   *  正常录错走「撤销登记」，这个是给对不上申请单、又确认不要了的记录用的。 */
+  async function removeRow(r) {
+    const yes = await confirmDialog(
+      `确定删除这条发货记录吗？<br><span class="mono">${escapeHtml(r.ship_no || '（无单号）')}</span>`
+      + ` · ${escapeHtml(r.product_model || '')} · ${r.qty || 0} 件<br>`
+      + '它没有关联到任何申请单；删除后台账上的发货量会相应减少。',
+      { title: '删除未关联记录', danger: true });
+    if (!yes) return;
+    try {
+      await api('/delivery/shipments/' + r.ship_id, { method: 'DELETE' });
+      toast('已删除该条发货记录', 'success');
+      resetSelection();
+      loadList();
+    } catch (e) {
+      toast('删除失败：' + apiErr(e), 'error');
+    }
+  }
+
+  function apiErr(e) {
+    return (e.detail && e.detail.message) ? e.detail.message
+      : (typeof e.detail === 'string' ? e.detail : e.message);
+  }
+
+  /* ================= 通用：字段行 ================= */
+  function fieldRow(label, node, hint, full) {
+    return h('div', { class: 'field' + (full ? ' field--full' : '') }, [
+      h('label', { class: 'field__label' }, label),
+      node,
+      hint ? h('div', { class: 'small muted', style: { marginTop: '4px' } }, hint) : null,
+    ].filter(Boolean));
+  }
+  function textInput(name, value, placeholder) {
+    const el = h('input', {
+      class: 'input', type: 'text', placeholder: placeholder || '',
+      dataset: { field: name },
+    });
+    el.value = value || '';
+    return el;
+  }
+  function normDate(v) {
+    // Excel 里粘贴来的日期常是 2026/9/21 这种，统一成 YYYY-MM-DD
+    const t = String(v || '').trim().replace(/[年月]/g, '-').replace(/[日]/g, '')
+      .replace(/\//g, '-');
+    const m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(t);
+    if (!m) return t;
+    const p2 = x => String(x).padStart(2, '0');
+    return `${m[1]}-${p2(m[2])}-${p2(m[3])}`;
+  }
+  function todayStr() {
+    const d = new Date();
+    const p2 = x => String(x).padStart(2, '0');
+    return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+  }
+
+  /* ================= 登记 / 修改发货（按行）=================
+     改版要点（2026-09-21）：发货记录**挂在申请明细的某一行上**，
+     不再有"不走申请单的手工登记" —— 所以厂家 / 风场 / 型号 / 件数
+     全部来自申请单，弹窗里只读展示，人只填**发货侧**才知道的信息。 */
+  function openRegisterDialog(r, isEdit) {
+    const infoCell = (k, v) => h('div', {},
+      [h('span', { class: 'dlvt-info__k' }, k), h('span', {}, v)]);
+    const info = h('div', { class: 'dlvt-info' }, [
+      infoCell('申请单号', r.request_no || '—'),
+      infoCell('产品行', '第 ' + r.line_no + ' 行'),
+      infoCell('整机厂家', r.turbine_vendor || '—'),
+      infoCell('项目风场', r.project_site || '—'),
+      infoCell('产品型号', r.product_model || '—'),
+      infoCell('料号', r.material_no || '—'),
+      infoCell('申请件数', String(r.apply_qty || 0) + ' 件'
+        + (r.need_return ? ' · 需返回' : ' · 不返回')),
+      infoCell('期望发货日', r.expect_ship_date || '—'),
+    ]);
+
+    const shipNoIn = h('input', {
+      class: 'input', type: 'text', placeholder: 'ERP 发货单号（必填）',
+    });
+    shipNoIn.value = r.ship_no || '';
+    const dateIn = h('input', {
+      class: 'input', type: 'date', style: { width: '170px' },
+    });
+    dateIn.value = r.ship_date || todayStr();
+    const qtyIn = h('input', {
+      class: 'input', type: 'number', min: '1', step: '1',
+      style: { width: '120px' },
+    });
+    qtyIn.value = String(r.ship_qty || r.apply_qty || 1);
+    const expIn = h('input', {
+      class: 'input', type: 'text', placeholder: '选填，如 SF1234567890',
+    });
+    expIn.value = r.express_no || '';
+    const remarkIn = h('textarea', {
+      class: 'textarea', rows: '2', placeholder: '选填',
+    });
+    remarkIn.value = r.remark || '';
+    const errBox = h('div', { class: 'dlv-err' });
+
+    const body = h('div', {}, [
+      errBox,
+      h('div', { class: 'dlvt-sec__title' },
+        '要登记的申请明细（来自申请单，不可改）'),
+      info,
+      h('div', { class: 'dlvt-sec__title', style: { marginTop: '16px' } }, '发货信息'),
+      h('div', { class: 'dlvt-grid' }, [
+        // ⚠️「必填」要写在 **hint** 里，不要只写进 placeholder ——
+        //   placeholder 一输入就消失，而且 DOM 校验读不到（textContent 不含它，
+        //   2026-09-21 自检里就因为这条 FAIL 过）。
+        fieldRow('发货单号 *', shipNoIn, '必填 —— ERP 里那张发货单的号，台账靠它追溯'),
+        fieldRow('发货日期 *', dateIn),
+        fieldRow('实发件数 *', qtyIn, `申请 ${r.apply_qty} 件；少发时改这里`),
+        fieldRow('物流单号', expIn),
+        fieldRow('备注', remarkIn, null, true),
+      ]),
+      h('div', { class: 'hint' },
+        isEdit
+          ? '只改发货信息（单号 / 日期 / 件数 / 物流）。'
+            + '要换到别的产品行，请先「撤销登记」再重新登记。'
+          : '登记后这一行变「已发货」。**整张单的明细都登记完**，'
+            + '申请单会自动转「已发货」—— 不用再去别处点一次「标记已发货」。'),
+    ]);
+
+    const okBtn = h('button', { class: 'btn btn--primary' },
+      isEdit ? '保存' : '确认登记');
+    function showError(msg) {
+      errBox.innerHTML = msg;
+      errBox.classList.add('on');
+      if (errBox.scrollIntoView) {
+        try { errBox.scrollIntoView({ block: 'nearest' }); } catch (e) { /* jsdom */ }
+      }
+    }
+    async function submit() {
+      const shipNo = shipNoIn.value.trim();
+      if (!shipNo) {
+        showError('发货单号必填 —— 台账要靠它追回 ERP 单据；'
+          + '没有单号的「已发货」在核对时查不下去。');
+        return;
+      }
+      const qv = Number(qtyIn.value || 0);
+      if (!qv || qv < 1) { showError('实发件数至少 1 件。'); return; }
+      okBtn.disabled = true;
+      okBtn.textContent = '提交中…';
+      const common = {
+        ship_no: shipNo, ship_date: normDate(dateIn.value), qty: qv,
+        express_no: expIn.value.trim(), remark: remarkIn.value.trim(),
+      };
+      try {
+        if (isEdit) {
+          await api('/delivery/shipments/' + r.ship_id,
+                    { method: 'PUT', body: common });
+          toast('已修改发货信息', 'success');
+        } else {
+          await api('/delivery/shipments/register', {
+            method: 'POST',
+            body: {
+              request_no: r.request_no, line_no: r.line_no,
+              ship_no: common.ship_no, ship_date: common.ship_date,
+              qty: common.qty, express_no: common.express_no,
+              remark: common.remark,
+            },
+          });
+          toast('已登记发货', 'success');
+        }
+        m.close();
+        resetSelection();
+        loadList();
+      } catch (e) {
+        showError((isEdit ? '修改失败：' : '登记失败：') + escapeHtml(apiErr(e)));
+        okBtn.disabled = false;
+        okBtn.textContent = isEdit ? '保存' : '确认登记';
+      }
+    }
+    okBtn.addEventListener('click', submit);
+    const m = openModal({
+      title: isEdit ? '修改发货信息' : '登记发货',
+      wide: true, body,
+      footer: [h('button', { class: 'btn', onclick: () => m.close() }, '取消'), okBtn],
+    });
+  }
+
+  /* ================= 批量导入（Excel 粘贴）================= */
+  function openImportDialog() {
+    const vendorIn = h('input', {
+      class: 'input', type: 'text', placeholder: '整机厂家（本批统一）*',
+    });
+    const siteIn = h('input', {
+      class: 'input', type: 'text', placeholder: '项目风场（本批统一）',
+    });
+    const needChk = h('input', { type: 'checkbox', checked: true });
+    const paste = h('textarea', {
+      class: 'textarea dlvt-paste',
+      placeholder: '发货单号\t发货日期\t物流单号\t产品型号\t数量\t料号\n'
+        + 'SHIP-001\t2026-09-21\tSF123\tBLF1-S\t2\t10001-0001\n'
+        + '（直接从 Excel 复制整片区域粘进来即可，列顺序照上面；料号可留空）',
+    });
+    const errBox = h('div', { class: 'dlv-err' });
+    const resBox = h('div', {});
+
+    const body = h('div', {}, [
+      errBox,
+      h('div', { class: 'dlvt-sec__title' }, '本批统一信息'),
+      h('div', { class: 'dlvt-grid' }, [
+        fieldRow('整机厂家 *', vendorIn),
+        fieldRow('项目风场', siteIn),
+        fieldRow('是否需要返回', h('label', { class: 'dlvt-chk' },
+          [needChk, h('span', {}, '需回收旧件')])),
+      ]),
+      h('div', { class: 'dlvt-sec__title', style: { marginTop: '16px' } },
+        '粘贴发货清单（每行一条，制表符或逗号分隔）'),
+      paste,
+      h('div', { class: 'hint' },
+        '<b>列顺序</b>：发货单号 · 发货日期 · 物流单号 · 产品型号 · 数量 · 料号（可空）。'
+        + '带表头行会自动跳过。<br>'
+        + '<b>幂等</b>：同一「发货单号 + 料号」重复导入只更新数量，不会重复入账 —— '
+        + '整批重导一次也不会让台账虚增。'),
+      resBox,
+    ]);
+
+    const okBtn = h('button', { class: 'btn btn--primary' }, '导入');
+    function showError(msg) {
+      errBox.innerHTML = msg;
+      errBox.classList.add('on');
+    }
+    function parseRows() {
+      const lines = paste.value.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+      const out = [];
+      const bad = [];
+      lines.forEach((line, idx) => {
+        const cells = line.split(/\t|,(?=(?:[^"]*"[^"]*")*[^"]*$)/)
+          .map(x => x.trim().replace(/^"|"$/g, ''));
+        if (idx === 0 && /发货单号|型号/.test(cells.join(''))) return;   // 表头
+        if (!cells.length || !cells.join('')) return;
+        const [shipNo, shipDate, expressNo, model, qty, materialNo] = cells;
+        if (!model) {
+          bad.push(`第 ${idx + 1} 行：缺产品型号`);
+          return;
+        }
+        if (!qty || isNaN(Number(qty))) {
+          bad.push(`第 ${idx + 1} 行：数量不是数字（${qty || '空'}）`);
+          return;
+        }
+        out.push({
+          turbine_vendor: vendorIn.value.trim(),
+          project_site: siteIn.value.trim(),
+          ship_no: shipNo || '', ship_date: normDate(shipDate) || todayStr(),
+          express_no: expressNo || '', product_model: model,
+          qty: Number(qty), material_no: materialNo || '',
+          need_return: needChk.checked,
+        });
+      });
+      return { rows: out, bad };
+    }
+    async function submit() {
+      const parsed = parseRows();
+      if (!parsed.rows.length) {
+        showError('没有解析出可导入的行。' + (parsed.bad.length
+          ? '<br>' + parsed.bad.map(escapeHtml).join('<br>') : ''));
+        return;
+      }
+      okBtn.disabled = true;
+      okBtn.textContent = '导入中…';
+      let res;
+      try {
+        res = await api('/delivery/shipments/import', {
+          method: 'POST', body: { rows: parsed.rows },
+        });
+      } catch (e) {
+        showError('导入失败：' + escapeHtml(apiErr(e)));
+        okBtn.disabled = false;
+        okBtn.textContent = '导入';
+        return;
+      }
+      const failed = (res.failed || []).concat(
+        parsed.bad.map(x => ({ row: 0, reason: x })));
+      // ★ 结果如实展示：新增多少、更新多少、哪几行没进来、为什么
+      const resChildren = [
+        h('h4', { class: 'dlvt-res__ok' },
+          `✓ 新增 ${res.created} 条，更新 ${res.updated} 条`),
+      ];
+      if (failed.length) {
+        resChildren.push(
+          h('h4', { class: 'dlvt-res__no' }, `✗ 未导入 ${failed.length} 行`),
+          h('ul', {}, failed.map(x => h('li', {},
+            (x.row ? `第 ${x.row} 行 —— ` : '') + x.reason))),
+        );
+      }
+      resChildren.push(h('div', { class: 'hint' },
+        '更新 = 该「发货单号 + 料号」已存在，只刷新了数量与日期（幂等）。'));
+      body.replaceChildren(h('div', { class: 'dlvt-res' }, resChildren));
+      const foot = m.modal.querySelector('.modal__foot');
+      if (foot) {
+        foot.replaceChildren(h('button', {
+          class: 'btn btn--primary',
+          onclick: () => { m.close(); resetSelection(); loadList(); },
+        }, '知道了'));
+      }
+    }
+    okBtn.addEventListener('click', submit);
+    const m = openModal({
+      title: '批量导入发货记录', wide: true, body,
+      footer: [h('button', { class: 'btn', onclick: () => m.close() }, '取消'), okBtn],
+    });
+  }
+
+  /* ================= 人工挂接申请单 ================= */
+  async function openLinkDialog(ids) {
+    ids = (ids || []).filter(x => x !== undefined && x !== null);
+    if (!ids.length) { toast('请先勾选要挂接的发货记录', 'info'); return; }
+    let reqs = [];
+    try {
+      const res = await api('/delivery/requests?page_size=200&sort_dir=desc');
+      reqs = res.rows || [];
+    } catch (e) { reqs = []; }
+
+    const sel = fixedSelect({
+      name: 'link_request_no', value: '', placeholder: '请选择申请单',
+      options: reqs.map(r => ({
+        value: r.request_no,
+        label: `${r.request_no} · ${r.project_site || '—'} · ${r.line_count || 0} 种`,
+      })),
+    });
+    const errBox = h('div', { class: 'dlv-err' });
+
+    const body = h('div', {}, [
+      errBox,
+      h('div', { class: 'dlvt-sec__title' },
+        `把 ${ids.length} 条发货记录挂接到一张申请单`),
+      fieldRow('申请单', sel),
+      h('div', { class: 'hint' },
+        '挂接后，这些记录会带上该申请单的<b>整机厂家与项目风场</b>，'
+        + '并按<b>料号</b>自动对上对应的产品行 —— 对上了就不再显示「未关联」。<br>'
+        + '<b>为什么要人工挂</b>：ERP 同步来的记录往往只有发货单号与料号、'
+        + '对不上申请单号 —— 这种情况系统**不猜**，列出来让人确认。<br>'
+        + '⚠️ 若该产品行**已经有发货记录**，这次挂接不会去覆盖它'
+        + '（会继续保持「未关联」，由你自己比对哪条才对）。'),
+    ]);
+
+    const okBtn = h('button', { class: 'btn btn--primary' }, '确认挂接');
+    async function submit() {
+      const no = sel.value;
+      if (!no) {
+        errBox.innerHTML = '请选择要挂接到的申请单。';
+        errBox.classList.add('on');
+        return;
+      }
+      okBtn.disabled = true;
+      okBtn.textContent = '处理中…';
+      try {
+        const res = await api('/delivery/shipments/link',
+          { method: 'POST', body: { ids, request_no: no } });
+        toast(`已挂接 ${res.linked} 条到 ${no}`, 'success');
+        m.close();
+        resetSelection();
+        loadList();
+      } catch (e) {
+        errBox.innerHTML = '挂接失败：' + escapeHtml(apiErr(e));
+        errBox.classList.add('on');
+        okBtn.disabled = false;
+        okBtn.textContent = '确认挂接';
+      }
+    }
+    okBtn.addEventListener('click', submit);
+    const m = openModal({
+      title: '挂接到申请单', body,
+      footer: [h('button', { class: 'btn', onclick: () => m.close() }, '取消'), okBtn],
+    });
+  }
+
+  /* ================= 启动 ================= */
+  /* 从「待发货清单」的「去登记发货」跳过来时带着 ?request_no= —— 直接把它填进
+     关键词框，筛出这一张单的**全部明细**（待发的可以直接登记，已发的可见），
+     发货员不用再手动搜一次。刻意**不**顺带切到「只看待发货」：一张单刚开了头时，
+     看到"哪几行已发、哪几行还差"比只看待发更有用。 */
+  const _jumpNo = (new URLSearchParams(location.search).get('request_no') || '').trim();
+  if (_jumpNo) {
+    keyword = _jumpNo;
+    kwInput.value = _jumpNo;
+  }
+  // 首屏渲染放在最后：上面的函数依赖本文件中后置声明的 let/const，
+  // 提前调用会触发 TDZ 错误并中断整个 IIFE（本项目记录过的坑）。
+  await loadList();
+  kwInput.focus();
+})();
+</script>
+</body>
+</html>

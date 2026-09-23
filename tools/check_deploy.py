@@ -199,6 +199,11 @@ else:
     check("容器内监听 0.0.0.0（否则端口映射进不来）",
           "ARS_HOST=0.0.0.0" in df.replace(" ", ""))
     check("有启动命令", any(l.startswith(("CMD", "ENTRYPOINT")) for l in df_lines))
+    # 备份容器要用 mysqldump 出库、mysql 导入影子库（tools/backup.py / check_backup.py）。
+    # 少了它主服务照常跑，备份要到运行时才报「找不到 mysqldump」。
+    check("镜像里有 mysql 客户端（备份要用 mysqldump）",
+          "default-mysql-client" in df or "mysql-client" in df,
+          "缺它备份会在运行时才失败")
 
     # .dockerignore：**data/ 绝不能进镜像**
     if not os.path.exists(".dockerignore"):
@@ -224,14 +229,14 @@ if os.path.exists("docker-compose.yml"):
         print("  [NOTE] 没装 PyYAML，compose 只做文本级核对")
     if parsed:
         svcs = parsed.get("services", {})
-        check("定义了两个服务：ars + backup", set(svcs) == {"ars", "backup"},
-              ", ".join(svcs))
+        check("定义了三个服务：mysql + ars + backup",
+              set(svcs) == {"ars", "backup", "mysql"}, ", ".join(svcs))
         ports = [str(p) for p in (svcs.get("ars", {}).get("ports") or [])]
         check("端口只绑 127.0.0.1（对外交给反代）",
               bool(ports) and all(p.startswith("127.0.0.1:") for p in ports),
               str(ports))
         vols = [str(v) for v in (svcs.get("ars", {}).get("volumes") or [])]
-        check("挂载 data 卷（否则容器一删数据全没）",
+        check("挂载 data 卷（否则容器一删照片与备份全没）",
               any("/app/data" in v for v in vols), str(vols))
         check("backup 服务也共享同一 data 卷",
               any("/app/data" in str(v) for v in
@@ -243,14 +248,61 @@ if os.path.exists("docker-compose.yml"):
         check("主服务有健康检查", "healthcheck" in svcs.get("ars", {}))
         check("日志有大小上限（防 json 日志写满磁盘）",
               "logging" in svcs.get("ars", {}))
+
+        # ---- 数据库：库是外部依赖，缺了这几项应用起不来 ----
+        my = svcs.get("mysql", {})
+        check("mysql 服务用 8.0 镜像", "mysql:8.0" in str(my.get("image", "")),
+              str(my.get("image")))
+        check("库文件挂在命名卷上（否则容器一删业务数据全没）",
+              any("mysql-data" in str(v) and "/var/lib/mysql" in str(v)
+                  for v in (my.get("volumes") or [])), str(my.get("volumes")))
+        check("mysql 服务有健康检查（ars 靠它决定何时启动）",
+              "healthcheck" in my)
+        check("建库脚本挂在 initdb.d 上（否则六个 schema 不存在）",
+              any("docker-entrypoint-initdb.d" in str(v)
+                  for v in (my.get("volumes") or [])), str(my.get("volumes")))
+        dep = svcs.get("ars", {}).get("depends_on") or {}
+        check("ars 等库健康后再启动（连不上库时早报错）",
+              "mysql" in dep and (dep.get("mysql") or {}).get("condition")
+              == "service_healthy", str(dep))
+        for svc in ("ars", "backup"):
+            senv = svcs.get(svc, {}).get("environment") or {}
+            check(f"{svc} 服务拿到了数据库地址与账号",
+                  "ARS_MYSQL_HOST" in senv and "ARS_MYSQL_USER" in senv, ", ".join(senv))
+            check(f"{svc} 服务的库口令由外部注入（缺失则拒绝启动）",
+                  ":?" in str(senv.get("ARS_MYSQL_PASSWORD", "")),
+                  str(senv.get("ARS_MYSQL_PASSWORD")))
+
+        # ---- 建库脚本：六个 schema + 账号 + 影子库授权 ----
+        init_sh = Path("deploy") / "mysql-init.sh"
+        if not init_sh.exists():
+            check("存在 deploy/mysql-init.sh（建六个 schema 与 ars 账号）", False,
+                  "compose 挂了它，文件不在容器就起不来")
+        else:
+            ish = init_sh.read_text(encoding="utf-8")
+            _all_schemas = all(s in ish for s in
+                               ("returns_db", "inspect_db", "handle_db",
+                                "items_db", "auth_db", "delivery_db"))
+            check("建库脚本覆盖六个 schema", _all_schemas)
+            check("建库脚本强制 mysql_native_password（PyMySQL 做不了 caching_sha2 的密钥交换）",
+                  "mysql_native_password" in ish)
+            check("建库脚本授了 verify\\_% 影子库（备份的还原演练要建临时库）",
+                  "verify\\_%" in ish)
+            check("建库脚本**不给**全局权限（演练写错也炸不到真库）",
+                  "ON *.*" not in ish and "ALL PRIVILEGES ON *" not in ish,
+                  "只授权到具体 schema")
     else:
         for needle, name in (
                 ("services:", "有 services 段"),
                 ("ars:", "有 ars 服务"),
                 ("backup:", "有 backup 服务"),
+                ("mysql:", "有 mysql 服务"),
+                ("mysql-data", "库文件有命名卷"),
                 ("127.0.0.1:8000:8000", "主界面绑定宿主本机"),
                 ("./data:/app/data", "挂载 data 卷"),
                 ("ARS_BOOTSTRAP_PASSWORD", "注入管理员密码"),
+                ("ARS_MYSQL_PASSWORD", "注入数据库口令"),
+                ("docker-entrypoint-initdb.d", "挂了建库脚本"),
                 ("healthcheck", "有健康检查")):
             check(name, needle in raw)
 
@@ -259,8 +311,45 @@ if os.path.exists("docker-compose.yml"):
         check(".env.example 提醒改初始密码", "ARS_BOOTSTRAP_PASSWORD" in envx)
         check(".env.example 说明 Cookie Secure 与 HTTPS 的配套",
               "ARS_COOKIE_SECURE" in envx and "ARS_HTTPS_ONLY" in envx)
+        check(".env.example 里有数据库连接项",
+              "ARS_MYSQL_HOST" in envx and "ARS_MYSQL_PASSWORD" in envx,
+              "compose 的 mysql 服务靠它建账号")
     else:
         check("存在 .env.example（compose 需要它生成 .env）", False)
+
+# ---------------------------------------------------------------------------
+# 6b. 局域网开放：启动脚本的三档预设 + 防火墙放行工具
+# ---------------------------------------------------------------------------
+print("\n== [6b] 局域网开放 ==")
+if os.path.exists("start.bat"):
+    sb = open("start.bat", encoding="utf-8").read()
+    check("start.bat 的 --lan 把主界面绑到 0.0.0.0",
+          "--lan" in sb and "ARS_HOST=0.0.0.0" in sb.replace(" ", ""),
+          "绑在 127.0.0.1 上时同事连不上")
+    check("start.bat 的 --public 才把数据接口一起对外",
+          "ARS_OPEN_API_HOST=0.0.0.0" in sb.replace(" ", ""),
+          "8100 跟着 8000 一起对外是额外暴露面")
+else:
+    check("存在 start.bat（Windows 启动脚本）", False)
+
+# 放行防火墙这一步**刻意不放进应用**：服务不该自己去改防火墙。
+# 于是它成了一个容易被漏掉的运维动作 —— 守在这里，别只在文档里写着。
+fw = Path("tools") / "open_lan_firewall.bat"
+if not fw.exists():
+    check("存在 tools/open_lan_firewall.bat（放行 Windows 防火墙入站 8000）", False,
+          "缺它同事打不开，而脚本又是唯一的放行入口")
+else:
+    fws = fw.read_text(encoding="utf-8", errors="replace")
+    check("放行脚本针对 8000 端口", "8000" in fws)
+    check("规则名与文档一致（收回时要能对上）",
+          "ARS main UI TCP" in fws)
+    check("能收回放行（/remove 分支）", "/remove" in fws)
+    check("非管理员时自己提权（Start-Process -Verb RunAs）",
+          "-Verb RunAs" in fws and "Start-Process" in fws)
+    check("**不碰** 8100（数据接口不跟着对外）", "8100" not in fws,
+          "8100 白名单为空等于不限制，绝不能顺手放开")
+    check("全 ASCII（.bat 按 ANSI 码页读，中文在别的区域设置下会乱码）",
+          all(ord(ch) < 128 for ch in fws))
 
 # ---------------------------------------------------------------------------
 # 7. 备份：工具 + 定时器
@@ -268,16 +357,54 @@ if os.path.exists("docker-compose.yml"):
 print("\n== [7] 数据备份 ==")
 if os.path.exists("tools/backup.py"):
     bk = open("tools/backup.py", encoding="utf-8").read()
-    check("用 VACUUM INTO 做一致性快照（不是直接拷文件）",
-          "VACUUM INTO" in bk,
-          "WAL 模式下直接拷 .db 会丢未 checkpoint 的事务")
-    check("备份五个库 + 照片目录", "PHOTO_DIR" in bk and "DATABASES" in bk)
+    check("用 mysqldump --single-transaction 做一致性快照（不是直接拷库文件）",
+          "--single-transaction" in bk and "--databases" in bk,
+          "InnoDB 边写边导会拿到半截事务；拷 datadir 更是直接拿到坏快照")
+    check("口令走 --defaults-extra-file 的临时 cnf（不进命令行/不留痕）",
+          "--defaults-extra-file" in bk and "_write_cnf" in bk,
+          "口令写进 argv 会出现在进程列表里")
+    check("dump 成功也要逐表核对（防「成功但只导了结构」）",
+          "_dump_tables" in bk and "-- Dump completed" in bk)
+    # 真正的检查：backup.py 的 DATABASES 必须**逐个覆盖** config.SCHEMAS。
+    # ⚠️ 别只数「有几个库」—— 那跟 backup.py 声明了什么毫无关系：
+    # 把 delivery 从 DATABASES 里删掉，库数一个不变，断言照样 PASS
+    # （这个假绿是负向测试当场抓出来的，已改成实际比对 import 进来的清单）。
+    from pathlib import Path as _P                                 # noqa: PLC0415
+    import importlib.util as _ilu                                  # noqa: PLC0415
+    _root = str(_P(__file__).resolve().parent.parent)
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
+    from config import SCHEMAS as _SCHEMAS                         # noqa: PLC0415
+
+    _spec = _ilu.spec_from_file_location("_bk", "tools/backup.py")
+    _mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    declared = {s for s, _label in _mod.DATABASES}
+    missing = sorted(set(_SCHEMAS) - declared)
+    check(f"备份清单覆盖全部 {len(_SCHEMAS)} 个库",
+          not missing,
+          f"DATABASES 声明 {len(declared)} 个：{sorted(declared)}"
+          + (f"  ❌ 漏了 {missing}" if missing else ""))
+    check("备份含照片目录（照片是磁盘文件，不在库里）", "PHOTO_DIR" in bk)
     check("写完才落 DONE 标记（残缺备份不冒充可用）", '"DONE"' in bk or "'DONE'" in bk)
     check("有轮转且只轮转自己产出的目录", "STAMP_RE" in bk and "keep" in bk)
     check("失败时写失败状态并返回非 0", "_write_status(False" in bk)
     check("支持 --dry-run / --list", "--dry-run" in bk and "--list" in bk)
 else:
     check("存在 tools/backup.py", False)
+
+if os.path.exists("tools/check_backup.py"):
+    cb = open("tools/check_backup.py", encoding="utf-8").read()
+    # 只比 sha256 与退出码是不够的：前者只证明文件没被改动过，
+    # 后者只证明 mysqldump 自己觉得跑完了。恢复演练才是「能用」。
+    check("备份自检真的做还原演练（导进影子库再逐表比行数）",
+          "verify_" in cb and "_restore_drill" in cb and "mysql" in cb,
+          "只比 sha256 = 只证明文件没变，不证明能恢复")
+    check("还原演练用影子库、跑完必删（不会碰真库）",
+          "DROP DATABASE IF EXISTS" in cb and "VERIFY_PREFIX" in cb)
+    check("还原演练缺权限时给出补授权的具体命令", "GRANT ALL PRIVILEGES" in cb)
+else:
+    check("存在 tools/check_backup.py", False)
 
 for unit, name in (("deploy/ars-backup.service", "备份 service"),
                    ("deploy/ars-backup.timer", "备份 timer")):

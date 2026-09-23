@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>检测登记 · 售后返件登记系统</title>
   <link rel="icon" href="/favicon.ico" sizes="any">
-  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260920p">
-  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260920p">
-<link rel="stylesheet" href="/static/assets/app.css?v=20260920p">
+  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260923b">
+  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260923b">
+<link rel="stylesheet" href="/static/assets/app.css?v=20260923b">
 </head>
 <body>
-<script src="/static/assets/common.js?v=20260920p"></script>
+<script src="/static/assets/common.js?v=20260923b"></script>
 <script>
 (async () => {
   const pendingTag = h('span', { class: 'tag' }, '待检测 —');
@@ -230,13 +230,16 @@
   /* ================= 状态判定 ================= */
   function lineStatus(ln) {
     const tested = !!(ln.test_date || '').trim();
-    const done = (ln.completion || '').includes('完结');
+    /* ⚠️ 判「已完结」必须**严格等** —— 「未完结」里也含「完结」两个字，
+       用 includes 找「完结」会把未完结的行判成已完结（左栏显示绿色「已完结」）。 */
+    const done = (ln.completion || '') === '已完结';
     if (done) return ['已完结', 'tag--success'];
     if (tested) return ['检测中', 'tag--brand'];
     return ['未检测', ''];
   }
 
-  const isLineDone = ln => (ln.completion || '').includes('完结');
+  // ⚠️ 严格等（理由同 lineStatus）
+  const isLineDone = ln => (ln.completion || '') === '已完结';
 
   /* ================= 左侧清单渲染 ================= */
   async function loadList() {

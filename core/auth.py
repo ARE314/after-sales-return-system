@@ -21,7 +21,6 @@ import hashlib
 import hmac
 import json
 import secrets
-import sqlite3
 from datetime import datetime, timedelta
 
 from config import (AUTH_BOOTSTRAP_PASSWORD, AUTH_BOOTSTRAP_USER,
@@ -51,6 +50,18 @@ PERMISSION_GROUPS = [
         {"key": "page.query", "label": "明细查询"},
         {"key": "page.dashboard", "label": "数据看板"},
         {"key": "page.items", "label": "匹配数据库"},
+        {"key": "page.delivery_apply", "label": "发货申请"},
+        {"key": "page.delivery_pending", "label": "待发货清单"},
+        {"key": "page.delivery_track", "label": "发货跟踪"},
+        {"key": "page.delivery_ledger", "label": "核销台账"},
+        {"key": "page.delivery_detail", "label": "发货明细"},
+        # 2026-09-22 新增：两个 ERP 数据源（匹配库 / 发货明细）的自动同步进度
+        # 集中到这一页；两个业务页面上的同步卡片随之撤掉。运维性质，默认只给管理员。
+        {"key": "page.sync_tasks", "label": "自动同步任务"},
+        # 2026-09-23 新增：删除不再「一去不回」—— 删掉的东西进回收站，
+        # 保留期内可还原。它能看到**全系统任何人**删掉的数据，运维性质，
+        # 默认只给管理员。
+        {"key": "page.recycle", "label": "回收站"},
         {"key": "page.api", "label": "数据接口"},
         {"key": "page.auth", "label": "权限设置"},
     ]},
@@ -60,8 +71,37 @@ PERMISSION_GROUPS = [
         {"key": "act.delete", "label": "删除明细"},
         {"key": "act.export", "label": "导出数据"},
         {"key": "act.items", "label": "物料维护（增删 / 导入）"},
+        # 匹配库同步：2026-09-22 起同步改成**整表全量覆盖** —— ERP 返回什么就
+        # 只剩什么，本地人工补的品名 / 旧料号 / 描述会随之清空；配置里还带 ERP
+        # 账号密码。所以从 act.items 里拆出来单设一个点，默认只给管理员。
+        {"key": "act.items_sync", "label": "匹配库同步 / 连接配置"},
+        # 发货申请拆成三个点：提交是日常动作，编辑次之，删除是破坏性的。
+        # 审批点（act.delivery_approve）**不在这里** —— 系统不做审批流程，
+        # 等真要接审批时再加，避免权限页出现一个勾了也没用的开关。
+        {"key": "act.delivery_submit", "label": "提交发货申请"},
+        {"key": "act.delivery_edit", "label": "修改发货申请"},
+        {"key": "act.delivery_delete", "label": "删除发货申请"},
+        # 出队 / 撤销出队共用一个点 —— 同一件事的正反面，拆两个只会让
+        # 管理员多勾一个框。它改的是申请状态（会让单子离开待发货队列），
+        # 所以是「操作」而不是「只读」。
+        {"key": "act.delivery_ship", "label": "标记发货 / 撤销发货"},
+        # 台账上的核销动作（手动核销关联 / 手工清账 / 撤销 / 维护别名表）——
+        # 它们都会**改掉台账上的差额结论**，是这套流程里最需要留痕的动作，
+        # 所以共用一个权限点，默认只给管理员（登记员能看台账但不能改核销结论）。
+        {"key": "act.delivery_clear", "label": "核销台账核销操作（关联 / 清账）"},
+        # 发货明细是 ERP 出货明细的本地镜像，页面本身只读；
+        # 这个点管的是**重新拉取 + 改 ERP 连接配置** ——
+        # 会覆盖整张表、且配置里带 ERP 账号密码，所以默认只给管理员。
+        {"key": "act.delivery_detail", "label": "发货明细同步 / 连接配置"},
+        # 「立即同步」＝常规同步（增量：近 2 天 + 本地未核准的单），是日常动作，
+        # 登记员也给；「全量同步」＝整表覆盖 8.9 万行，破坏性，单独一个点，
+        # 默认只给管理员。
+        {"key": "act.delivery_detail_full", "label": "发货明细全量同步（整表覆盖）"},
     ]},
     {"title": "系统管理", "perms": [
+        # 回收站的还原与彻底删除共用一个点 —— 都是「动回收站里的东西」，
+        # 拆两个只会让管理员多勾一个框。默认只给管理员。
+        {"key": "act.recycle", "label": "回收站还原 / 彻底删除"},
         {"key": "act.openapi", "label": "数据接口配置（令牌 / 白名单 / 范围）"},
         {"key": "act.user", "label": "用户与权限组管理"},
         {"key": "act.settings", "label": "系统开关（登录验证开关）"},
@@ -82,6 +122,13 @@ PAGE_PERMS = {
     "query.html": "page.query",
     "dashboard.html": "page.dashboard",
     "items.html": "page.items",
+    "delivery-apply.html": "page.delivery_apply",
+    "delivery-pending.html": "page.delivery_pending",
+    "delivery-track.html": "page.delivery_track",
+    "delivery-ledger.html": "page.delivery_ledger",
+    "delivery-detail.html": "page.delivery_detail",
+    "sync-tasks.html": "page.sync_tasks",
+    "recycle.html": "page.recycle",
     "api.html": "page.api",
     "auth.html": "page.auth",
 }
@@ -104,20 +151,65 @@ PRESET_GROUPS = [
         "description": "日常登记与查询，不能删数据、不能改用户与接口",
         "perms": [
             "page.index", "page.scan", "page.inspect", "page.handle",
-            "page.query", "page.dashboard",
+            "page.query", "page.dashboard", "page.delivery_apply",
+            "page.delivery_pending", "page.delivery_track",
+            "page.delivery_ledger",
+            # 发货明细：能看，也能点「立即同步」（常规增量，只刷近 2 天 +
+            # 本地未核准的单）。**不给 act.delivery_detail_full** ——
+            # 全量同步整表覆盖 8.9 万行，属于管理员动作。
+            "page.delivery_detail",
+            # 发货申请对登记员开放「提交 + 编辑」，但**不给删除** ——
+            # 单子是跟着货走的凭证，删了没法追溯，默认只留给管理员。
             "act.create", "act.edit", "act.export",
+            "act.delivery_submit", "act.delivery_edit",
+            # 常规同步（增量）开放给登记员：日常补数据靠它，全量才要管理员。
+            "act.delivery_detail",
+            # 2026-09-22：同步进度集中到「自动同步任务」页后，登记员要能进这一页 ——
+            # 否则他持有 act.delivery_detail（常规同步权）却点不到那个按钮。
+            # 全量同步（act.delivery_detail_full）与匹配库同步仍只给管理员。
+            "page.sync_tasks",
+            # 出队是仓库/登记的日常动作，登记员该有；撤销出队也一并给了（同一权限点），
+            # 因为「点错了要能改回来」比「防止误撤销」更重要 —— 撤销本身有留痕。
+            # 发货记录的手工登记 / 导入 / 挂接同样归 act.delivery_ship。
+            "act.delivery_ship",
+            # ⚠️ **不给 act.delivery_clear**：清账会把台账上的差额抹掉，
+            # 是这套流程里最需要克制的动作，默认只留给管理员。
         ],
         "builtin": 1,
     },
     {
         "name": "只读",
         "description": "只能查看与导出，不能改动任何数据",
-        "perms": ["page.index", "page.query", "page.dashboard", "act.export"],
+        "perms": ["page.index", "page.query", "page.dashboard",
+                  # 只读组能看发货申请 / 待发货清单 / 发货跟踪 / 台账 / 发货明细，
+                  # 但一不能提交、改、删、出队，二不能清账、不能触发 ERP 同步
+                  "page.delivery_apply", "page.delivery_pending",
+                  "page.delivery_track", "page.delivery_ledger",
+                  "page.delivery_detail",
+                  "act.export"],
         "builtin": 1,
     },
 ]
 # 被锁定的组（权限不可改）
 LOCKED_GROUPS = [g["name"] for g in PRESET_GROUPS if g.get("locked")]
+
+# 内置组的**定向补丁**：某个权限点的语义变了（同一件事被拆成两个点，或者
+# 某类角色本该获得一个当时还不存在的点）时，老库里的内置组不会自动跟着变 ——
+# `ensure_bootstrap` 只强制同步**锁定组**，非锁定内置组保持原样（那是刻意的：
+# 管理员可能主动去掉过某项权限）。这类「必须补一次」的改动在这里显式列出：
+# **只加不删、加过就不再动** —— 管理员之后手动去掉也不会被加回来
+# （要去掉请直接在权限页改，别往这张表里加删除逻辑）。
+#
+# ⚠️ 与 PRESET_GROUPS 的分工：那张表只影响**新建**的库，这张表负责**老库**。
+BUILTIN_PERM_PATCHES = [
+    {"group": "登记员", "perm": "page.sync_tasks",
+     "reason": "2026-09-22 新增「自动同步任务」页 —— 两个业务页上的同步卡撤掉了，"
+               "登记员手上的常规同步权（act.delivery_detail）需要这一页才够得着。"},
+    {"group": "登记员", "perm": "act.delivery_detail",
+     "reason": "2026-09-22 发货明细同步拆成「立即同步＝常规增量」与"
+               "「全量同步＝整表覆盖」两个点：日常补数据该给登记员，"
+               "破坏性的那个（act.delivery_detail_full）仍然只给管理员。"},
+]
 
 
 def _now() -> str:
@@ -160,19 +252,32 @@ def verify_password(password: str, stored: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def get_setting(key: str, default: str = "") -> str:
+    # ⚠️ `key` 是 MySQL 保留字，反引号不能省（省了直接语法错 1064）
     row = get_conn().execute(
-        "SELECT value FROM auth_db.setting WHERE key = ?;", (key,)).fetchone()
+        "SELECT value FROM auth_db.setting WHERE `key` = ?;", (key,)).fetchone()
     return row["value"] if row else default
 
 
 def set_setting(key: str, value: str) -> None:
     with tx() as conn:
         conn.execute(
-            "INSERT INTO auth_db.setting(key, value, updated_at) "
-            "VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET "
-            "value = excluded.value, updated_at = excluded.updated_at;",
+            "INSERT INTO auth_db.setting(`key`, value, updated_at) "
+            "VALUES (?,?,?) ON DUPLICATE KEY UPDATE "
+            "value = VALUES(value), updated_at = VALUES(updated_at);",
             (key, "" if value is None else str(value), _now()),
         )
+
+
+def del_setting(key: str) -> None:
+    """删掉一项 setting（= 「回落到默认值」）。
+
+    ⚠️ 与 `set_setting(key, "")` 语义不同：那条会在表里留一行空串。
+    对取值逻辑没影响（空串同样回落默认），但**直接看库的人一定会读错** ——
+    「配过、值是空的」和「没配」长得完全一样。配置类字段一律用这个删，
+    别写空串进去（见 core/erp_conn.py）。
+    """
+    with tx() as conn:
+        conn.execute("DELETE FROM auth_db.setting WHERE `key` = ?;", (key,))
 
 
 def auth_enabled() -> bool:
@@ -549,11 +654,13 @@ def recent_logs(limit: int = 100) -> list:
 def ensure_bootstrap() -> dict:
     """幂等初始化：预置权限组 + 首个管理员。
 
-    只在**缺失时**创建，不会覆盖已有配置 —— 每次启动都会调用。
+    只在**缺失时**创建，不覆盖已有配置 —— 每次启动都会调用。
+    **例外：锁定组（管理员）的权限会被强制同步**，理由见下面的注释。
     """
-    created = {"groups": [], "admin": None}
+    created = {"groups": [], "admin": None, "synced": [], "patched": []}
     for g in PRESET_GROUPS:
-        if not group_by_name(g["name"]):
+        row = group_by_name(g["name"])
+        if not row:
             with tx() as conn:
                 conn.execute(
                     "INSERT INTO auth_db.permission_group(name, description, "
@@ -562,6 +669,44 @@ def ensure_bootstrap() -> dict:
                     (g["name"], g["description"],
                      json.dumps(g["perms"], ensure_ascii=False), _now(), _now()))
             created["groups"].append(g["name"])
+            continue
+
+        # ★ 锁定组（只有「管理员」）强制同步为预设权限。
+        #
+        # 为什么必须做：权限点注册表加一项后，**老库里的组记录不会自动获得它**
+        # （组是首次建库时按当时的 perms 快照写入的）。症状是「新功能的接口一律
+        # 403，而管理员自己也不知道要去权限页勾一下」—— 2026-09-21 加发货申请
+        # 权限点时实测踩到，且每次加权限点都会复现。
+        #
+        # 只同步**锁定组**是刻意的：它的语义本就是「全权且不可削减」
+        # （见 PRESET_GROUPS 里 locked 的说明），同步它既堵住这个洞，
+        # 又不会误伤任何人的定制。非锁定组（登记员 / 只读）保持原样 ——
+        # 管理员可能主动去掉过某项权限，自动加回来会违背「内置组可改权限」的约定。
+        if g.get("locked") and list(row.get("perms") or []) != list(g["perms"]):
+            with tx() as conn:
+                conn.execute(
+                    "UPDATE auth_db.permission_group SET perms = ?, updated_at = ? "
+                    "WHERE id = ?;",
+                    (json.dumps(g["perms"], ensure_ascii=False), _now(), row["id"]))
+            created["synced"].append(g["name"])
+
+    # ★ 内置组的定向补丁（见 BUILTIN_PERM_PATCHES）：只在**缺失**时补进去，
+    #   一次一条、幂等。放在锁定组同步之后：管理员组那份可能刚刚被整体覆盖，
+    #   这里再按补丁表检查一遍不会重复加（`if perm in perms: continue`）。
+    for _patch in BUILTIN_PERM_PATCHES:
+        row = group_by_name(_patch["group"])
+        if not row or _patch["perm"] not in ALL_PERMS:
+            continue
+        perms = list(row.get("perms") or [])
+        if _patch["perm"] in perms:
+            continue
+        with tx() as conn:
+            conn.execute(
+                "UPDATE auth_db.permission_group SET perms = ?, updated_at = ? "
+                "WHERE id = ?;",
+                (json.dumps(perms + [_patch["perm"]], ensure_ascii=False),
+                 _now(), row["id"]))
+        created["patched"].append(f'{_patch["group"]} + {_patch["perm"]}')
 
     if get_conn().execute(
             "SELECT COUNT(*) c FROM auth_db.users;").fetchone()["c"] == 0:

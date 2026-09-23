@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>退回登记 · 售后返件登记系统</title>
   <link rel="icon" href="/favicon.ico" sizes="any">
-  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260920p">
-  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260920p">
-<link rel="stylesheet" href="/static/assets/app.css?v=20260920p">
+  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260923b">
+  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260923b">
+<link rel="stylesheet" href="/static/assets/app.css?v=20260923b">
 </head>
 <body>
-<script src="/static/assets/common.js?v=20260920p"></script>
+<script src="/static/assets/common.js?v=20260923b"></script>
 <script>
 (async () => {
   const modeTag = h('span', { class: 'tag tag--brand' }, '待扫描');
@@ -1286,7 +1286,7 @@
           h('div', { class: 'match-banner match-banner--hit mb12' }, [
             h('span', { class: 'match-banner__icon' }, '✓'),
             h('div', {},
-              `已写入 ${res.count} 条产品明细，待同步队列 +${res.count}`),
+              `已写入 ${res.count} 条产品明细`),
           ]),
           h('table', { class: 'table table--compact' }, h('tbody', {}, [
             h('tr', {}, [

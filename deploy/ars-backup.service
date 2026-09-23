@@ -6,10 +6,10 @@
 # 注释字符必须是 `#`（systemd 只认它）。
 
 [Unit]
-Description=售后返件登记系统 —— 数据备份（五库 + 照片，一致性快照）
+Description=售后返件登记系统 —— 数据备份（六个 schema + 照片，一致性快照）
 Documentation=file:/opt/ars/deploy/README.md
-# 与主服务没有强依赖：备份走只读的 VACUUM INTO，服务在跑也能做。
-# 但让它在服务之后启动，避免开机时两者抢磁盘。
+# 与主服务没有强依赖：备份走 mysqldump 的 --single-transaction 一致性快照，
+# 服务在跑也能做。但让它在服务之后启动，避免开机时两者抢磁盘。
 After=ars.service
 
 [Service]
@@ -19,7 +19,11 @@ Group=ars
 WorkingDirectory=/opt/ars
 
 Environment=PYTHONUNBUFFERED=1
-# 保留份数（当前全量约 1.3 MB/份，14 份占用很小；照片多了要重估）
+# 数据库连接。**备份进程必须拿到这些**（backup.py 用 PyMySQL 查行数、
+# 调 mysqldump 出库）。口令不写在本文件里 —— unit 会被 `systemctl cat`
+# 原样打印出来 —— 走 EnvironmentFile 从 .env 读（前缀 `-` = 文件不存在也不报错）。
+EnvironmentFile=-/opt/ars/.env
+# 保留份数（mysqldump 文本全量当前约 35 MB/份；照片多了要重估）
 # 由 backup.py 自己读这个环境变量 —— systemd 的 ExecStart **不做变量展开**，
 # 所以配置项一律走 Environment，别在 ExecStart 里写 ${...}。
 Environment=ARS_BACKUP_KEEP=14

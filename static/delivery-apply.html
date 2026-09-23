@@ -1,0 +1,1242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>发货申请 · 售后返件登记系统</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260923b">
+  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260923b">
+<link rel="stylesheet" href="/static/assets/app.css?v=20260923b">
+<style>
+  /* ================= 页面专属样式 =================
+     只服务发货申请这一页，所以放页面内而不进 app.css ——
+     进公共样式表就得连带递增全部 11 个页面的版本号。 */
+
+  /* ---- 主表字段的两列并排 ---- */
+  .dlv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 18px; }
+  .dlv-grid .field--full { grid-column: 1 / -1; }
+  @media (max-width: 900px) { .dlv-grid { grid-template-columns: 1fr; } }
+  .dlv-sec { margin-bottom: 18px; }
+  .dlv-sec__title {
+    font-size: 12.5px; font-weight: 600; color: var(--text-secondary);
+    margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+  }
+
+  /* ---- 发货明细表 ---- */
+  .dlv-dt-wrap { border: 1px solid var(--border); border-radius: var(--radius);
+    overflow-x: auto; }
+  table.dlv-dt { min-width: 860px; font-size: 12.5px; }
+  table.dlv-dt th {
+    background: var(--bg-subtle); color: var(--text-secondary); font-weight: 600;
+    font-size: 11.5px; padding: 7px 8px; text-align: left; white-space: nowrap;
+    border-bottom: 1px solid var(--border);
+  }
+  table.dlv-dt td { padding: 4px 6px; border-bottom: 1px solid var(--border);
+    vertical-align: middle; }
+  table.dlv-dt tr:last-child td { border-bottom: none; }
+  table.dlv-dt td.idx { color: var(--text-tertiary); font-size: 11.5px; text-align: center; }
+  table.dlv-dt td.cc { text-align: center; }
+  table.dlv-dt .cell-in {
+    width: 100%; border: 1px solid transparent; background: transparent;
+    padding: 4px 6px; font: inherit; border-radius: 4px; outline: none;
+  }
+  table.dlv-dt .cell-in:hover { border-color: var(--border); background: var(--bg-subtle); }
+  table.dlv-dt .cell-in:focus { border-color: var(--brand); background: #fff; }
+  table.dlv-dt .cell-num { width: 52px; text-align: center; }
+  table.dlv-dt td.ro { color: var(--text-secondary); font-size: 12px; max-width: 150px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  table.dlv-dt td.ro.empty { color: #b6bcc4; }
+  table.dlv-dt td.ro.mono { font-family: var(--font-mono); font-size: 11.5px; }
+  table.dlv-dt td.bad { background: var(--danger-light); }
+  table.dlv-dt td.bad .cell-in { border-color: var(--danger); }
+  table.dlv-dt .row-del { border: none; background: transparent; color: var(--text-tertiary);
+    font-size: 15px; line-height: 1; padding: 1px 7px; cursor: pointer; border-radius: 4px; }
+  table.dlv-dt .row-del:hover { background: var(--danger-light); color: var(--danger); }
+  table.dlv-dt .row-del[disabled] { opacity: .25; cursor: not-allowed; }
+
+  /* 搜索框三态：空 / 待选定(黄) / 已选定(绿) */
+  .dlv-pk-wrap { position: relative; }
+  table.dlv-dt .cell-in.pk { padding-right: 22px; }
+  table.dlv-dt .cell-in.pk.on { color: var(--text-primary); border-color: #a6d8b4; background: #f7fdf9; }
+  table.dlv-dt .cell-in.pk.warn { border-color: var(--warning); background: #fffbf0; }
+  table.dlv-dt .pk-clear {
+    position: absolute; right: 3px; top: 50%; transform: translateY(-50%);
+    border: none; background: transparent; color: var(--text-tertiary);
+    font-size: 13px; line-height: 1; padding: 2px 5px; cursor: pointer; border-radius: 3px;
+  }
+  table.dlv-dt .pk-clear:hover { background: var(--danger-light); color: var(--danger); }
+  table.dlv-dt .pk-clear[hidden] { display: none !important; }
+
+  .dlv-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+  .dlv-stat { font-size: 12px; color: var(--text-tertiary); }
+  .dlv-note { font-size: 11.5px; color: var(--text-tertiary); margin-top: 6px; line-height: 1.8; }
+  .dlv-note.warn { color: var(--warning); }
+
+  /* ---- 物料候选面板 ----
+     必须 fixed + 高 z-index：它要在「新建/编辑」弹窗（.modal-mask）之上，
+     而弹窗的 body 有自己的滚动容器，absolute 挂在单元格里会被裁掉。 */
+  .dlv-picker {
+    position: fixed; z-index: 3000; background: #fff; border: 1px solid var(--border);
+    border-radius: var(--radius); box-shadow: 0 10px 32px rgba(16, 24, 40, .2);
+    max-height: 300px; overflow-y: auto; display: none;
+  }
+  .dlv-picker.on { display: block; }
+  .dlv-picker__head {
+    position: sticky; top: 0; z-index: 1; background: var(--bg-subtle);
+    border-bottom: 1px solid var(--border); padding: 5px 10px; font-size: 11.5px;
+    color: var(--text-tertiary); display: flex; justify-content: space-between; gap: 10px;
+  }
+  .dlv-picker__opt { padding: 6px 10px; cursor: pointer; border-bottom: 1px solid #f2f4f6; }
+  .dlv-picker__opt:last-child { border-bottom: none; }
+  .dlv-picker__opt.hl { background: #eef6ff; }
+  .dlv-picker__r1 { display: flex; gap: 9px; align-items: baseline; }
+  .dlv-picker__no { font-family: var(--font-mono); font-size: 12px; color: var(--brand); flex: none; }
+  .dlv-picker__nm { font-size: 12.5px; color: var(--text-primary); overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .dlv-picker__r2 { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 1px;
+    font-size: 11px; color: var(--text-tertiary); }
+  .dlv-picker__r2 b { color: var(--text-secondary); font-weight: 600; }
+  .dlv-picker__empty { padding: 10px; font-size: 12px; line-height: 1.8; color: var(--warning); }
+
+  /* ---- 详情弹窗 ---- */
+  .dlv-detail { font-size: 13px; }
+  .dlv-detail dl { display: grid; grid-template-columns: 92px 1fr; gap: 6px 12px; margin: 0 0 16px; }
+  .dlv-detail dt { color: var(--text-tertiary); font-size: 12px; }
+  .dlv-detail dd { margin: 0; word-break: break-all; }
+
+  /* ---- 顶部错误条 ---- */
+  .dlv-err {
+    display: none; margin-bottom: 12px; padding: 9px 12px; border-radius: var(--radius);
+    background: var(--danger-light); border: 1px solid #f3c2c2; color: var(--danger);
+    font-size: 12.5px; line-height: 1.8;
+  }
+  .dlv-err.on { display: block; }
+</style>
+</head>
+<body>
+<script src="/static/assets/common.js?v=20260923b"></script>
+<script>
+(async () => {
+  const countTag = h('span', { class: 'tag' }, '— 单');
+  const content = await mountLayout('delivery-apply', '发货申请',
+    '按标准表单提交发货需求（一张单可发多种产品）；提交后进入「待发货清单」',
+    [countTag]);
+
+  /* ================= 元数据 ================= */
+  let META = { status: [], match_limit: 40, field_labels: {} };
+  try {
+    META = await api('/delivery/meta');
+  } catch (e) {
+    content.replaceChildren(h('div', { class: 'empty' }, '加载失败：' + e.message));
+    return;
+  }
+  const LABEL = name => (META.field_labels || {})[name] || name;
+  const MATCH_LIMIT = META.match_limit || 40;
+
+  // 风机厂家 / 项目名称复用退回登记的同名字段候选（后端按字段归属自动分流），
+  // 所以这里拉的就是「历史退回里出现过的厂家与风场」。
+  let DICT = {};
+  try {
+    DICT = await loadDictMap(['turbine_vendor', 'project_site']);
+  } catch { DICT = {}; }
+
+  /* ================= 列表状态 ================= */
+  let listRows = [];
+  let total = 0;
+  let page = 1;
+  let keyword = '';
+  let filterStatus = '';
+  const PAGE_SIZE = 20;
+
+  const canSubmit = () => hasPerm('act.delivery_submit');
+  const canEdit = () => hasPerm('act.delivery_edit');
+  const canDelete = () => hasPerm('act.delivery_delete');
+
+  function buildQuery(params) {
+    const sp = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v === null || v === undefined || v === '') return;
+      sp.append(k, v === true ? '1' : v);
+    });
+    return sp.toString();
+  }
+
+  /* ================= 顶部筛选与列表 ================= */
+  const kwInput = h('input', {
+    class: 'input', style: { width: '220px' },
+    placeholder: '单号 / 收件人 / 地址 / 原因…',
+  });
+  let kwTimer = null;
+  kwInput.addEventListener('input', () => {
+    clearTimeout(kwTimer);
+    kwTimer = setTimeout(() => {
+      keyword = kwInput.value.trim();
+      page = 1;
+      loadList();
+    }, 320);
+  });
+
+  const statusSel = fixedSelect({
+    name: 'status_filter', value: '',
+    // placeholder: null —— 第一项就是「全部状态」（空值），
+    // 否则会再多一个空值的「请选择」，两个空选项看着像坏了
+    placeholder: null,
+    options: [{ value: '', label: '全部状态' }]
+      .concat((META.status || []).map(s => ({ value: s.value, label: s.label }))),
+    onChange: v => { filterStatus = v; page = 1; loadList(); },
+  });
+
+  const newBtn = h('button', {
+    class: 'btn btn--primary',
+    onclick: () => openEditor(''),
+  }, '＋ 新建申请');
+  newBtn.style.display = canSubmit() ? '' : 'none';
+
+  const listHost = h('div', { class: 'table-wrap' });
+  const pagerBox = h('div', { class: 'pager' });
+
+  const filterCard = h('div', { class: 'card mb16' }, [
+    h('div', { class: 'card__body' }, [
+      h('div', { class: 'inspect-toolbar' }, [
+        kwInput, statusSel, newBtn,
+        h('div', { class: 'inspect-toolbar__spacer' }),
+        h('button', { class: 'btn btn--sm', onclick: () => loadList() }, '刷新'),
+      ]),
+    ]),
+  ]);
+
+  const listCard = h('div', { class: 'card' }, [
+    h('div', { class: 'card__head' }, [
+      h('div', { class: 'card__title' }, '申请单'),
+      h('div', { class: 'card__hint' }, '一行一单；点「明细」展开该单的产品行'),
+    ]),
+    h('div', { class: 'card__body' }, [listHost, pagerBox]),
+  ]);
+
+  content.replaceChildren(filterCard, listCard);
+
+  const STATUS_TAG = {
+    draft: '', submitted: 'tag--brand', shipped: 'tag--success', closed: '',
+  };
+
+  async function loadList() {
+    const params = { page, page_size: PAGE_SIZE };
+    if (keyword) params.keyword = keyword;
+    if (filterStatus) params.status = filterStatus;
+
+    listHost.replaceChildren(h('div', { class: 'empty' }, '加载中…'));
+    let res;
+    try {
+      res = await api('/delivery/requests?' + buildQuery(params));
+    } catch (e) {
+      listHost.replaceChildren(h('div', { class: 'empty' }, '加载失败：' + e.message));
+      return;
+    }
+    listRows = res.rows || [];
+    total = res.total || 0;
+    renderList();
+    renderPager();
+    countTag.textContent = `${total} 单`;
+    countTag.className = 'tag' + (total ? ' tag--brand' : '');
+  }
+
+  function renderPager() {
+    const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    if (pages <= 1) { pagerBox.replaceChildren(); return; }
+    pagerBox.replaceChildren(
+      h('button', {
+        class: 'btn btn--sm', disabled: page <= 1,
+        onclick: () => { page -= 1; loadList(); },
+      }, '上一页'),
+      h('span', { class: 'small muted', style: { padding: '0 6px' } }, `${page} / ${pages}`),
+      h('button', {
+        class: 'btn btn--sm', disabled: page >= pages,
+        onclick: () => { page += 1; loadList(); },
+      }, '下一页'),
+    );
+  }
+
+  function renderList() {
+    if (!listRows.length) {
+      listHost.replaceChildren(h('div', { class: 'empty' },
+        keyword || filterStatus ? '没有匹配的申请单' : '还没有发货申请 —— 点「＋ 新建申请」开始'));
+      return;
+    }
+    const cols = ['申请单号', '申请人', '申请日期', '期望发货日', '风机厂家',
+      '项目名称', '明细', '状态', '操作'];
+    const thead = h('thead', {}, h('tr', {}, cols.map(c => h('th', {}, c))));
+    const tbody = h('tbody', {}, listRows.map(r => {
+      const tag = h('span', { class: 'tag ' + (STATUS_TAG[r.status] || '') },
+        r.status_label || r.status || '');
+      const acts = [];
+      acts.push(h('button', {
+        class: 'btn btn--sm', onclick: () => showDetail(r.request_no),
+      }, '查看'));
+      if (canEdit()) {
+        acts.push(h('button', {
+          class: 'btn btn--sm', style: { marginLeft: '5px' },
+          onclick: () => openEditor(r.request_no),
+        }, '编辑'));
+      }
+      if (canDelete()) {
+        acts.push(h('button', {
+          class: 'btn btn--sm btn--danger', style: { marginLeft: '5px' },
+          onclick: () => removeRequest(r),
+        }, '删除'));
+      }
+      return h('tr', {}, [
+        h('td', { class: 'mono' }, r.request_no || '—'),
+        h('td', {}, r.applicant || '—'),
+        h('td', {}, r.apply_date || '—'),
+        h('td', {}, r.expect_ship_date || '—'),
+        h('td', {}, r.turbine_vendor || '—'),
+        h('td', {}, r.project_site || '—'),
+        h('td', {}, [
+          `${r.line_count || 0} 种`,
+          h('span', { class: 'muted' }, ` / ${r.total_qty || 0} 件`),
+        ]),
+        h('td', {}, tag),
+        h('td', {}, acts),
+      ]);
+    }));
+    listHost.replaceChildren(h('table', { class: 'table table--compact' }, [thead, tbody]));
+  }
+
+  async function removeRequest(r) {
+    const yes = await confirmDialog(
+      `确定删除申请单 <b>${escapeHtml(r.request_no)}</b> 吗？<br>`
+      + '该单的产品明细会一并删除，无法恢复。', { title: '删除申请单', danger: true });
+    if (!yes) return;
+    try {
+      await api('/delivery/requests/' + encodeURIComponent(r.request_no), { method: 'DELETE' });
+      toast('已删除 ' + r.request_no, 'success');
+      loadList();
+    } catch (e) {
+      toast('删除失败：' + (e.detail && e.detail.message ? e.detail.message : e.message), 'error');
+    }
+  }
+
+  /* ================= 详情弹窗 ================= */
+  async function showDetail(requestNo) {
+    let d;
+    try {
+      d = await api('/delivery/requests/' + encodeURIComponent(requestNo));
+    } catch (e) {
+      toast('读取失败：' + e.message, 'error');
+      return;
+    }
+    const dl = h('dl', {}, [
+      h('dt', {}, '申请单号'), h('dd', { class: 'mono' }, d.request_no || '—'),
+      h('dt', {}, '状态'), h('dd', {}, d.status_label || d.status || '—'),
+      h('dt', {}, '申请人'), h('dd', {}, d.applicant || '—'),
+      h('dt', {}, '申请日期'), h('dd', {}, d.apply_date || '—'),
+      h('dt', {}, '期望发货日'), h('dd', {}, d.expect_ship_date || '—'),
+      h('dt', {}, '风机厂家'), h('dd', {}, d.turbine_vendor || '—'),
+      h('dt', {}, '项目名称'), h('dd', {}, d.project_site || '—'),
+      h('dt', {}, '收件地址'), h('dd', {}, d.ship_address || '—'),
+      h('dt', {}, '联系人'), h('dd', {}, d.ship_contact || '—'),
+      h('dt', {}, '电话'), h('dd', { class: 'mono' }, d.ship_phone || '—'),
+      h('dt', {}, '调换原因'), h('dd', {}, d.replace_reason || '—'),
+      h('dt', {}, '快递要求'), h('dd', {}, d.express_req || '—'),
+    ]);
+    const cols = ['#', '料号', '型号', '品名', '规格', '数量', '需返回'];
+    const thead = h('thead', {}, h('tr', {}, cols.map(c => h('th', {}, c))));
+    const tbody = h('tbody', {}, (d.items || []).map(it => h('tr', {}, [
+      h('td', {}, String(it.line_no)),
+      h('td', { class: 'mono' }, it.material_no || '—'),
+      h('td', { class: 'mono' }, it.product_model || '—'),
+      h('td', {}, it.product_name || '—'),
+      h('td', {}, it.spec || '—'),
+      h('td', {}, String(it.qty)),
+      h('td', {}, it.need_return ? '是' : '否'),
+    ])));
+    const body = h('div', { class: 'dlv-detail' }, [
+      dl,
+      h('div', { class: 'dlv-sec__title' },
+        `产品明细 —— 共 ${(d.items || []).length} 种 / ${d.total_qty || 0} 件，`
+        + `其中需返回 ${d.need_return_qty || 0} 件`),
+      h('div', { class: 'dlv-dt-wrap' },
+        h('table', { class: 'dlv-dt' }, [thead, tbody])),
+    ]);
+    // footer 里的 onclick 引用 m：箭头函数在点击时才求值，那时 m 已赋值，不会踩 TDZ
+    const m = openModal({
+      title: '发货申请单 ' + (d.request_no || ''),
+      wide: true, body,
+      footer: [h('button', { class: 'btn', onclick: () => m.close() }, '关闭')],
+    });
+  }
+
+  /* ================= 明细行：产品模糊搜索 ================= */
+  let seq = 0;
+  let rows = [];
+
+  function normText(v) {
+    return String(v === null || v === undefined ? '' : v)
+      .replace(/[\uFF01-\uFF5E]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+      .replace(/[\s\u3000]+/g, '').toUpperCase();
+  }
+
+  function newRowObj(init) {
+    seq += 1;
+    const r = {
+      _id: seq, _search: '', picked: false,
+      material_no: '', product_model: '', product_name: '', spec: '',
+      qty: 1, need_return: true,
+    };
+    Object.assign(r, init || {});
+    return r;
+  }
+
+  /* 搜索框三态：空 / 待选定(warn) / 已选定(on)。
+     ★ 只在这里算，重建渲染与局部刷新共用 ——
+       否则「重建时按状态渲染」和「局部更新时改 class」会打架，
+       出现「已选定却还标黄」这种自相矛盾的状态。 */
+  function pkClass(r) {
+    return 'cell-in pk'
+      + (r.picked ? ' on' : (String(r._search || '').trim() ? ' warn' : ''));
+  }
+
+  function renderTable() {
+    // ★ 用 dtHost 作用域查找，不用 document.getElementById ——
+    //   明细表要在弹窗**挂进文档之前**渲染一次（openEditor 里先建表再 openModal），
+    //   那时 #dlv-dtbody 还没进 document，按 id 查会拿到 null 并静默渲染成空表。
+    const tbody = dtHost.querySelector('tbody');
+    if (!tbody) return;
+    tbody.replaceChildren(...rows.map((r, i) => {
+      const wrap = h('div', { class: 'dlv-pk-wrap' }, [
+        h('input', {
+          class: pkClass(r), type: 'text', autocomplete: 'off',
+          dataset: { field: 'product_search', row: String(r._id) },
+          placeholder: '搜料号 / 品名 / 规格 / 型号',
+        }),
+        h('button', {
+          class: 'pk-clear', type: 'button', title: '清除重选',
+          dataset: { clear: String(r._id) }, hidden: !String(r._search || '').trim(),
+        }, '×'),
+      ]);
+      wrap.querySelector('input').value = r._search || '';
+      return h('tr', { dataset: { row: String(r._id) } }, [
+        h('td', { class: 'idx' }, String(i + 1)),
+        h('td', { class: r._badProduct ? 'bad' : '' }, wrap),
+        h('td', { class: 'cc' + (r._badQty ? ' bad' : '') }, [
+          h('input', {
+            class: 'cell-in cell-num', type: 'number', min: '1', step: '1',
+            dataset: { field: 'qty', row: String(r._id) }, value: String(r.qty),
+          }),
+        ]),
+        h('td', { class: 'cc' }, [
+          h('input', {
+            type: 'checkbox', dataset: { field: 'need_return', row: String(r._id) },
+            checked: r.need_return ? 'checked' : null,
+          }),
+        ]),
+        roTd(r.material_no, 'mono'),
+        roTd(r.product_model, 'mono'),
+        roTd(r.spec, ''),
+        h('td', { class: 'cc' }, [
+          h('button', {
+            class: 'row-del', title: rows.length <= 1 ? '至少保留一行' : '删除本行',
+            dataset: { del: String(r._id) }, disabled: rows.length <= 1 ? 'disabled' : null,
+          }, '×'),
+        ]),
+      ]);
+    }));
+    renderStat();
+  }
+
+  function roTd(val, extra) {
+    return h('td', { class: 'ro' + (extra ? ' ' + extra : '') + (val ? '' : ' empty') },
+      val || '—');
+  }
+
+  function paintRowStat(id) {
+    // 局部刷新：只改这一行的「料号 / 型号 / 规格 + 搜索框状态」
+    const tr = trById(id);
+    const r = rowById(id);
+    if (!tr || !r) return;
+    const inp = tr.querySelector('[data-field="product_search"]');
+    if (inp) {
+      inp.className = pkClass(r);
+      if (inp.value !== (r._search || '')) inp.value = r._search || '';
+    }
+    const clr = tr.querySelector('[data-clear]');
+    if (clr) clr.hidden = !String(r._search || '').trim();
+    const tds = tr.children;
+    setRo(tds[4], r.material_no, 'mono');
+    setRo(tds[5], r.product_model, 'mono');
+    setRo(tds[6], r.spec, '');
+  }
+
+  function setRo(td, val, extra) {
+    if (!td) return;
+    td.textContent = val || '—';
+    td.className = 'ro' + (extra ? ' ' + extra : '') + (val ? '' : ' empty');
+  }
+
+  function filledRows() {
+    return rows.filter(r => String(r._search || '').trim());
+  }
+
+  function renderStat() {
+    const valid = filledRows();
+    if (!valid.length) {
+      dtStat.textContent = rows.length > 1 ? `共 ${rows.length} 行 · 尚未录入产品` : '尚未录入产品';
+      return;
+    }
+    const totalQty = valid.reduce((s, r) => s + (Number(r.qty) || 0), 0);
+    const needRet = valid.filter(r => r.need_return);
+    const needQty = needRet.reduce((s, r) => s + (Number(r.qty) || 0), 0);
+    const unpicked = valid.filter(r => !r.picked).length;
+    dtStat.textContent = `共 ${rows.length} 行（已填 ${valid.length} 行）· 合计 ${totalQty} 件`
+      + (needRet.length ? ` · 需返回 ${needQty} 件` : ' · 均不需返回')
+      + (unpicked ? ` · ${unpicked} 行未选定` : '');
+  }
+
+  function rowById(id) {
+    const i = rows.findIndex(r => r._id === Number(id));
+    return i < 0 ? null : rows[i];
+  }
+  function trById(id) {
+    return dtHost.querySelector(`tbody tr[data-row="${id}"]`);
+  }
+
+  function applyPick(id, item) {
+    const r = rowById(id);
+    if (!r) return;
+    r.material_no = item.material_no || '';
+    r.product_model = item.product_model || '';
+    r.product_name = item.product_name || '';
+    r.spec = item.spec || '';
+    r.picked = true;
+    r._search = r.product_name || r.material_no;
+    r._badProduct = false;
+    const tr = trById(id);
+    if (tr) {
+      tr.children[1].classList.remove('bad');
+      paintRowStat(id);
+    } else {
+      renderTable();
+    }
+    renderStat();
+    updateNote();
+  }
+
+  function resetPick(id, opt) {
+    opt = opt || {};
+    const r = rowById(id);
+    if (!r) return;
+    r.picked = false;
+    r.material_no = ''; r.product_model = ''; r.product_name = ''; r.spec = '';
+    if (opt.clearText) r._search = '';
+    paintRowStat(id);
+    if (opt.focus) {
+      const inp = trById(id) && trById(id).querySelector('[data-field="product_search"]');
+      if (inp) inp.focus();
+    }
+    renderStat();
+    updateNote();
+  }
+
+  function updateNote() {
+    const el = dtNote;
+    // 只做「有没有选定」这一件事 —— 判「库里搜不搜得到」要联网，
+    // 那件事交给候选面板的空态去说（那里本来就有结果了），
+    // 放在这里会让每次打字都发一堆请求。
+    const un = [];
+    rows.forEach((r, i) => {
+      if (String(r._search || '').trim() && !r.picked) un.push(i + 1);
+    });
+    const parts = [];
+    if (un.length) {
+      parts.push(`第 ${un.join('、')} 行的产品<b>还没从候选中选定</b> —— `
+        + '请在下拉列表里点一项（产品必须从候选中选定，手填不算）');
+    }
+    if (!parts.length) {
+      el.className = 'dlv-note';
+      el.innerHTML = '在「产品」栏输入 <b>料号 / 品名 / 规格 / 型号</b> 的任意关键词'
+        + '（空格分词可收窄，如「风速 420」）→ <b>必须从下拉候选中选定一项</b> → '
+        + '自动得出料号 / 型号 / 规格。<b>产品不支持手工填写</b>；'
+        + '从 Excel 复制多行可整段粘贴，会自动拆行并逐行匹配。';
+    } else {
+      el.className = 'dlv-note warn';
+      el.innerHTML = parts.join('；');
+    }
+  }
+
+  /* ================= 物料候选面板 ================= */
+  const pickerEl = h('div', { class: 'dlv-picker' });
+  document.body.appendChild(pickerEl);
+  let pickerRowId = 0, pickerHit = [], pickerHl = -1, pickerTotal = 0, pickerQuery = '';
+  let searchTimer = null;
+
+  const pickerOpen = () => pickerEl.className.indexOf('on') >= 0;
+  function closePicker() {
+    pickerEl.className = 'dlv-picker';
+    pickerEl.replaceChildren();
+    pickerRowId = 0; pickerHit = []; pickerHl = -1; pickerTotal = 0;
+  }
+
+  function renderPicker() {
+    if (!pickerTotal) {
+      pickerEl.replaceChildren(h('div', { class: 'dlv-picker__empty' }, [
+        `物料库里没有匹配「${pickerQuery}」的项。`,
+        h('br'),
+        '• 换个关键词试试（料号 / 品名 / 规格 / 型号 都能搜）',
+        h('br'),
+        '• 若确实没有这个物料，需先请管理员补进物料库 —— ',
+        h('b', {}, '产品必须从候选中选定，不能手工填写'),
+      ]));
+      return;
+    }
+    const head = h('div', { class: 'dlv-picker__head' }, [
+      h('span', {}, `匹配 ${pickerTotal} 项`
+        + (pickerTotal > pickerHit.length ? `，显示前 ${pickerHit.length} 项 —— 继续输入可收窄` : '')),
+      h('span', {}, '↑↓ 选 · Enter 定 —— 必须选定一项'),
+    ]);
+    const opts = pickerHit.map((it, i) => h('div', {
+      class: 'dlv-picker__opt' + (i === pickerHl ? ' hl' : ''),
+      dataset: { i: String(i) },
+    }, [
+      h('div', { class: 'dlv-picker__r1' }, [
+        h('span', { class: 'dlv-picker__no' }, it.material_no || '—'),
+        h('span', { class: 'dlv-picker__nm' }, it.product_name || '（无品名）'),
+      ]),
+      h('div', { class: 'dlv-picker__r2' }, [
+        it.product_model ? h('span', {}, ['型号 ', h('b', {}, it.product_model)]) : null,
+        it.spec ? h('span', {}, '规格 ' + it.spec) : null,
+        it.description ? h('span', {}, it.description) : null,
+      ].filter(Boolean)),
+    ]));
+    pickerEl.replaceChildren(head, ...opts);
+  }
+
+  function setPickerHl(i) {
+    pickerHl = i;
+    pickerEl.querySelectorAll('.dlv-picker__opt').forEach((el, k) => {
+      el.classList.toggle('hl', k === i);
+    });
+  }
+
+  function placePicker(inputEl) {
+    const box = inputEl.getBoundingClientRect();
+    const vw = window.innerWidth || 1280, vh = window.innerHeight || 800;
+    const w = Math.min(600, Math.max(380, vw - 40));
+    pickerEl.style.width = w + 'px';
+    pickerEl.style.left = Math.max(8, Math.min(box.left, vw - w - 8)) + 'px';
+    const top = box.bottom + 4;
+    if (top + 300 > vh) {
+      pickerEl.style.top = 'auto';
+      pickerEl.style.bottom = Math.max(8, vh - box.top + 4) + 'px';
+    } else {
+      pickerEl.style.bottom = 'auto';
+      pickerEl.style.top = top + 'px';
+    }
+  }
+
+  async function openPicker(id, inputEl) {
+    const r = rowById(id);
+    if (!r || !inputEl) return;
+    const q = String(r._search || '').trim();
+    if (!q) { closePicker(); return; }
+    pickerRowId = id;
+    pickerQuery = q;
+    pickerHit = []; pickerTotal = 0; pickerHl = -1;
+    // 先给个「搜索中」，不要用上一轮的残留数据渲染（否则会看到别的关键词的结果）
+    pickerEl.replaceChildren(h('div', {
+      class: 'dlv-picker__empty', style: { color: 'var(--text-tertiary)' },
+    }, '搜索中…'));
+    pickerEl.className = 'dlv-picker on';
+    placePicker(inputEl);
+
+    let res;
+    try {
+      res = await api('/delivery/items?' + buildQuery({ keyword: q, limit: MATCH_LIMIT }));
+    } catch (e) {
+      pickerEl.replaceChildren(h('div', { class: 'dlv-picker__empty' },
+        '搜索失败：' + e.message));
+      return;
+    }
+    // 打字快时先发的请求可能后到 —— 期间关键词或行变了就丢弃这次响应
+    const cur = rowById(id);
+    if (pickerRowId !== id || !cur
+        || pickerQuery !== String(cur._search || '').trim()) return;
+    pickerHit = res.rows || [];
+    pickerTotal = res.total || 0;
+    pickerHl = pickerHit.length ? 0 : -1;
+    renderPicker();
+    placePicker(inputEl);
+  }
+
+  function choosePickerItem(i) {
+    if (!pickerRowId) return;
+    const it = pickerHit[i];
+    if (!it) return;
+    const id = pickerRowId;
+    closePicker();
+    applyPick(id, it);
+  }
+
+  /* ================= 明细表事件（委托） ================= */
+  const dtHost = h('div', { class: 'dlv-dt-wrap' });
+  const dtStat = h('span', { class: 'dlv-stat', id: 'dlv-stat' });
+  const dtNote = h('div', { class: 'dlv-note', id: 'dlv-note' });
+
+  function buildTableHost() {
+    const thead = h('thead', {}, h('tr', {}, [
+      h('th', { style: { width: '30px' } }, '#'),
+      h('th', { style: { width: '230px' } }, '产品 ', h('span', { class: 'req' }, '*')),
+      h('th', { style: { width: '58px' } }, '数量 ', h('span', { class: 'req' }, '*')),
+      h('th', { style: { width: '54px' } }, '需返回'),
+      h('th', { style: { width: '104px' } }, '料号'),
+      h('th', { style: { width: '126px' } }, '型号'),
+      h('th', { style: { width: '116px' } }, '规格'),
+      h('th', { style: { width: '34px' } }, ''),
+    ]));
+    dtHost.replaceChildren(h('table', { class: 'dlv-dt' },
+      [thead, h('tbody', { id: 'dlv-dtbody' })]));
+  }
+
+  dtHost.addEventListener('input', async e => {
+    const el = e.target;
+    const field = el.dataset ? el.dataset.field : '';
+    if (!field) return;
+    const r = rowById(el.dataset.row);
+    if (!r) return;
+
+    if (field === 'product_search') {
+      r._search = el.value;
+      if (r.picked && el.value !== (r.product_name || r.material_no)) resetPick(r._id);
+      const tr = trById(r._id);
+      if (tr) tr.children[1].classList.remove('bad');
+      paintRowStat(r._id);
+      renderStat();
+      updateNote();
+      clearTimeout(searchTimer);
+      const id = r._id;
+      searchTimer = setTimeout(() => {
+        const cur = rowById(id);
+        const inp = trById(id) && trById(id).querySelector('[data-field="product_search"]');
+        if (!cur || !inp || !String(cur._search || '').trim()) { closePicker(); return; }
+        openPicker(id, inp);
+      }, 150);
+    } else if (field === 'qty') {
+      r.qty = el.value === '' ? '' : Number(el.value);
+      const tr = trById(r._id);
+      if (tr) tr.children[2].classList.remove('bad');
+      renderStat();
+    }
+    const box = document.getElementById('dlv-err');
+    if (box) box.classList.remove('on');
+  });
+
+  dtHost.addEventListener('change', e => {
+    const el = e.target;
+    if (!el.dataset || el.dataset.field !== 'need_return') return;
+    const r = rowById(el.dataset.row);
+    if (r) { r.need_return = el.checked; renderStat(); updateNote(); }
+  });
+
+  dtHost.addEventListener('click', e => {
+    const clr = e.target.closest ? e.target.closest('[data-clear]') : null;
+    if (clr) {
+      resetPick(clr.dataset.clear, { clearText: true, focus: true });
+      closePicker();
+      return;
+    }
+    const del = e.target.closest ? e.target.closest('[data-del]') : null;
+    if (!del || del.disabled) return;
+    const id = Number(del.dataset.del);
+    const i = rows.findIndex(r => r._id === id);
+    if (i < 0) return;
+    if (pickerRowId === id) closePicker();
+    rows.splice(i, 1);
+    if (!rows.length) rows.push(newRowObj());
+    renderTable();
+    updateNote();
+  });
+
+  dtHost.addEventListener('keydown', e => {
+    const el = e.target.closest ? e.target.closest('[data-field]') : null;
+    if (!el) return;
+    const r = rowById(el.dataset.row);
+    if (!r) return;
+    const i = rows.indexOf(r);
+
+    // 候选面板打开时：↑↓ / Enter / Esc 先归面板 ——
+    // 否则「按回车选定」会变成「回车新增一行」，两个功能抢同一个键。
+    if (el.dataset.field === 'product_search' && pickerOpen() && pickerRowId === r._id) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (!pickerHit.length) return;
+        setPickerHl((pickerHl + (e.key === 'ArrowDown' ? 1 : -1) + pickerHit.length)
+          % pickerHit.length);
+        const cur = pickerEl.querySelector('.dlv-picker__opt.hl');
+        if (cur && cur.scrollIntoView) cur.scrollIntoView({ block: 'nearest' });
+        return;
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        if (pickerHl >= 0) choosePickerItem(pickerHl);
+        return;
+      }
+      if (e.key === 'Escape') { e.preventDefault(); closePicker(); return; }
+    }
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (i === rows.length - 1) addRow({}, el.dataset.field);
+    else focusCell(rows[i + 1]._id, el.dataset.field);
+  });
+
+  dtHost.addEventListener('focusin', e => {
+    const el = e.target;
+    if (!el.dataset || el.dataset.field !== 'product_search') return;
+    const r = rowById(el.dataset.row);
+    if (!r || r.picked) return;                       // 已选定的行不打扰
+    if (!String(r._search || '').trim()) return;
+    openPicker(r._id, el);
+  });
+  dtHost.addEventListener('focusout', e => {
+    const el = e.target;
+    if (!el.dataset || el.dataset.field !== 'product_search') return;
+    setTimeout(() => {
+      const ae = document.activeElement;
+      if (ae && (pickerEl.contains(ae) || (ae.dataset && ae.dataset.field === 'product_search'))) return;
+      closePicker();
+    }, 160);
+  });
+
+  pickerEl.addEventListener('mousedown', e => {
+    const opt = e.target.closest ? e.target.closest('.dlv-picker__opt') : null;
+    if (!opt) return;
+    e.preventDefault();          // 阻止输入框失焦，否则面板先被关掉
+    choosePickerItem(Number(opt.dataset.i));
+  });
+  pickerEl.addEventListener('mouseover', e => {
+    const opt = e.target.closest ? e.target.closest('.dlv-picker__opt') : null;
+    if (!opt) return;
+    setPickerHl(Number(opt.dataset.i));
+  });
+  document.addEventListener('mousedown', e => {
+    if (!pickerOpen()) return;
+    const t = e.target;
+    if (pickerEl.contains(t)) return;
+    if (t && t.dataset && t.dataset.field === 'product_search') return;
+    closePicker();
+  });
+
+  /* ---- Excel 多行粘贴 ----
+     从 Excel 复制「料号 / 品名」一列（或再加一列数量）整段粘到明细表：
+     自动按行拆、自动补行，并逐行去物料库匹配 —— 唯一命中就直接选定，
+     多个命中或没命中则留下关键词待人工确认（不猜）。 */
+  dtHost.addEventListener('paste', async e => {
+    const el = e.target;
+    if (!el.dataset || el.dataset.field !== 'product_search') return;
+    const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+    if (!text || !/[\t\r\n]/.test(text)) return;      // 单值粘贴不拦截
+    e.preventDefault();
+
+    const grid = text.replace(/\r/g, '').replace(/\n+$/, '')
+      .split('\n').map(line => line.split('\t'));
+    let start = rows.findIndex(r => r._id === Number(el.dataset.row));
+    if (start < 0) start = rows.length;
+
+    let added = 0, picked = 0, needPick = 0;
+    for (let ri = 0; ri < grid.length; ri++) {
+      const idx = start + ri;
+      while (rows.length <= idx) { rows.push(newRowObj()); added += 1; }
+      const r = rows[idx];
+      const kw = (grid[ri][0] || '').trim();
+      if (kw) {
+        r._search = kw;
+        r.picked = false;
+        const qtyCell = (grid[ri][1] || '').trim();
+        if (/^\d+$/.test(qtyCell)) r.qty = Number(qtyCell);
+        let res = null;
+        try {
+          res = await api('/delivery/items?' + buildQuery({ keyword: kw, limit: MATCH_LIMIT }));
+        } catch { /* 单行失败不影响其余行 */ }
+        if (res && (res.rows || []).length === 1) {
+          const it = res.rows[0];
+          r.material_no = it.material_no || '';
+          r.product_model = it.product_model || '';
+          r.product_name = it.product_name || '';
+          r.spec = it.spec || '';
+          r.picked = true;
+          r._search = r.product_name || r.material_no;
+          picked += 1;
+        } else {
+          // 多个命中或没命中都留关键词待人工确认 —— 不猜（宁可让人点一下）
+          needPick += 1;
+        }
+      }
+    }
+    renderTable();
+    updateNote();
+    toast(`已粘贴 ${grid.length} 行：自动选定 ${picked} 行`
+      + (needPick ? `，${needPick} 行需人工从候选中确认` : '')
+      + (added ? `（新增 ${added} 行）` : ''), needPick ? 'warn' : 'success');
+  });
+
+  function addRow(init, focusField) {
+    const r = newRowObj(init);
+    rows.push(r);
+    renderTable();
+    updateNote();
+    if (focusField) focusCell(r._id, focusField);
+    return r;
+  }
+
+  function focusCell(id, field) {
+    const el = trById(id) && trById(id).querySelector(`[data-field="${field}"]`);
+    if (!el) return;
+    if (field === 'product_search') el.focus();
+    else { el.focus(); if (el.select) el.select(); }
+  }
+
+  /* ================= 地址自动拆分（从退回登记页搬来） =================
+     用户习惯把「地址 + 姓名 + 电话」整段贴着，顺序还不固定。
+     ★ 两条底线不能松：
+       ① 找不到电话就完全不动（连多余空格都不折叠）—— 不猜；
+       ② 姓名必须紧挨电话、且不含地址特征字 —— 宁可漏判，
+          错判会把地址片段吞进联系人栏、地址凭空少一截且很难发现。 */
+  const PHONE_RE = /(?:^|[^\d])((?:1[3-9](?:[ \t\u3000-]?\d){9})|(?:0\d{2,3}[- \t\u3000]\d{7,8}(?:[- \t\u3000]?\d{1,5})?))(?!\d)/;
+  const ADDR_CHARS = /[省市县区镇乡村街路巷号栋幢楼室层单门司部厂场站港苑园城屯堡庄营组座寺桥道里弄期]/;
+
+  function cleanName(t) {
+    t = (t || '').trim();
+    const m = /^[^:：]{0,6}[:：]\s*(.+)$/.exec(t);
+    if (m) t = m[1].trim();
+    return t.replace(/^[\s:：,，、.。;；()（）\[\]【】]+/, '')
+            .replace(/[\s:：,，、.。;；()（）\[\]【】]+$/, '');
+  }
+  const looksLikeName = t => /^[\u4e00-\u9fa5]{2,4}$/.test(t) && !ADDR_CHARS.test(t);
+  const normPhone = raw => raw.replace(/[\s\u3000]/g, '');
+  const tidy = s => s.replace(/[\t\u3000]/g, ' ').replace(/\s{2,}/g, ' ').trim();
+
+  function cutRanges(s0, ranges) {
+    ranges.sort((a, b) => a[0] - b[0]);
+    let out = '', cur = 0;
+    ranges.forEach(r => {
+      if (r[0] > cur) out += s0.slice(cur, r[0]);
+      if (r[1] > cur) cur = r[1];
+    });
+    return out + s0.slice(cur);
+  }
+
+  function splitAddress(raw) {
+    const m = PHONE_RE.exec(raw);
+    if (!m) return null;
+    const phoneRaw = m[1];
+    const start = m.index + m[0].indexOf(phoneRaw);
+    const end = start + phoneRaw.length;
+    const cuts = [[start, end]];
+    const left = raw.slice(0, start), right = raw.slice(end);
+    let name = '';
+    const mr = /^(\s*)(\S+)/.exec(right);
+    if (mr) {
+      const nm = cleanName(mr[2]);
+      if (nm && looksLikeName(nm)) {
+        name = nm;
+        const st = end + mr[1].length + mr[2].indexOf(nm);
+        cuts.push([st, st + nm.length]);
+      }
+    }
+    if (!name) {
+      const ml = /(\S+)(\s*)$/.exec(left);
+      if (ml) {
+        const nm = cleanName(ml[1]);
+        if (nm && looksLikeName(nm)) {
+          name = nm;
+          const st = ml.index + ml[1].indexOf(nm);
+          cuts.push([st, st + nm.length]);
+        }
+      }
+    }
+    return { addr: tidy(cutRanges(raw, cuts)), phone: normPhone(phoneRaw), name };
+  }
+
+  /* ================= 新建 / 编辑弹窗 ================= */
+  let editorCtl = null;      // {address, contact, phone, hint}
+
+  function field(label, node, opts) {
+    opts = opts || {};
+    return h('div', { class: 'field' + (opts.full ? ' field--full' : '') }, [
+      h('label', { class: 'field__label' }, [
+        label, opts.req ? h('span', { class: 'req' }, ' *') : null,
+      ].filter(Boolean)),
+      node,
+      opts.hint ? h('div', { class: 'small muted', style: { marginTop: '4px' } }, opts.hint) : null,
+    ].filter(Boolean));
+  }
+
+  function dictBox(name, value, placeholder) {
+    const cb = combobox({
+      name, value: value || '', placeholder: placeholder || '',
+      options: (DICT[name] || []).map(o => ({ value: o.value, use_count: o.use_count })),
+      allowNew: true,
+    });
+    return cb;
+  }
+
+  function plainInput(name, value, placeholder, cls) {
+    const el = h('input', {
+      class: 'input' + (cls ? ' ' + cls : ''), type: 'text',
+      placeholder: placeholder || '', dataset: { field: name },
+    });
+    el.value = value || '';
+    return el;
+  }
+
+  function textArea(name, value, rows_, placeholder, max) {
+    const ta = h('textarea', {
+      class: 'textarea', dataset: { field: name },
+      style: { minHeight: (rows_ * 22 + 16) + 'px' },
+      placeholder: placeholder || '',
+    });
+    ta.value = value || '';
+    if (max) { ta.maxLength = max; }
+    return ta;
+  }
+
+  async function openEditor(requestNo) {
+    let data = null;
+    if (requestNo) {
+      try {
+        data = await api('/delivery/requests/' + encodeURIComponent(requestNo));
+      } catch (e) {
+        toast('读取失败：' + e.message, 'error');
+        return;
+      }
+    }
+    const d = data || {
+      turbine_vendor: '', project_site: '', expect_ship_date: today(),
+      ship_address: '', ship_contact: '', ship_phone: '',
+      replace_reason: '', express_req: '',
+    };
+
+    // ---- 主表控件 ----
+    const vendorBox = dictBox('turbine_vendor', d.turbine_vendor, '如 金风科技（可选已有，也可录入新值）');
+    const siteBox = dictBox('project_site', d.project_site, '与退回登记的「项目风场」同源');
+    const dateEl = h('input', { class: 'input', type: 'date', dataset: { field: 'expect_ship_date' } });
+    dateEl.value = d.expect_ship_date || today();
+    const addrEl = textArea('ship_address', d.ship_address, 3,
+      '省 / 市 / 区 + 详细地址 + 收件单位\n也可整段粘贴「地址 + 姓名 + 电话」，离开本栏后自动拆分', 200);
+    const contactEl = plainInput('ship_contact', d.ship_contact, '如 张三');
+    const phoneEl = plainInput('ship_phone', d.ship_phone, '手机 11 位，或座机 区号-号码', 'input--mono');
+    const reasonEl = textArea('replace_reason', d.replace_reason, 4,
+      '说明为什么要调换（整单一个原因）', 500);
+    const expressEl = textArea('express_req', d.express_req, 3,
+      '快递公司偏好 / 寄付到付 / 保价 / 包装要求；无特殊要求可写「无」', 200);
+
+    const splitHint = h('div', { class: 'small muted', style: { marginTop: '5px' } },
+      '地址里带电话（和姓名）时，离开本栏会自动拆分');
+    let autoVals = { ship_contact: '', ship_phone: '' };
+
+    function applySplit() {
+      const raw = (addrEl.value || '').trim();
+      if (!raw) return;
+      const res = splitAddress(raw);
+      if (!res) { splitHint.textContent = '没找到电话（11 位手机，或「区号-号码」座机）—— 地址未改动'; return; }
+      const got = [];
+      [['ship_contact', res.name, contactEl], ['ship_phone', res.phone, phoneEl]].forEach(
+        ([name, val, el]) => {
+          if (!val) return;
+          const cur = (el.value || '').trim();
+          if (cur && cur !== autoVals[name]) return;    // 人工优先：人填过就不覆盖
+          if (cur === val) return;
+          el.value = val;
+          autoVals[name] = val;
+          got.push(name === 'ship_contact' ? `联系人「${val}」` : `电话「${val}」`);
+        });
+      if (res.addr && res.addr !== raw) addrEl.value = res.addr;
+      splitHint.textContent = got.length
+        ? `✓ 已从地址拆出 ${got.join(' · ')}，地址栏只留地址`
+        : '地址里没有可拆出的新信息（已填的栏位不覆盖）';
+    }
+    addrEl.addEventListener('blur', applySplit);
+    addrEl.addEventListener('paste', () => setTimeout(applySplit, 0));
+
+    const mainGrid = h('div', { class: 'dlv-grid' }, [
+      field('风机厂家', vendorBox, { req: true }),
+      field('项目名称', siteBox, { req: true }),
+      field('期望发货日', dateEl, { req: true, hint: '待发货清单的排序依据' }),
+      field('收件地址', h('div', {}, [addrEl, splitHint]), { req: true, full: true }),
+      field('联系人', contactEl, { req: true }),
+      field('电话', phoneEl, { req: true }),
+      field('调换原因', reasonEl, { req: true, full: true, hint: '整单一个原因，不随明细行拆分' }),
+      field('快递要求', expressEl, { req: true, full: true }),
+    ]);
+
+    // ---- 明细 ----
+    rows = [];
+    seq = 0;
+    (d.items || []).forEach(it => rows.push(newRowObj({
+      _search: it.product_name || it.material_no || '',
+      picked: true,
+      material_no: it.material_no || '',
+      product_model: it.product_model || '',
+      product_name: it.product_name || '',
+      spec: it.spec || '',
+      qty: it.qty || 1,
+      need_return: !!it.need_return,
+    })));
+    if (!rows.length) rows.push(newRowObj());
+
+    buildTableHost();
+    renderTable();
+    updateNote();
+
+    const dtHead = h('div', { class: 'dlv-sec__title' }, '产品明细（一行一种产品）');
+    const dtTools = h('div', { class: 'dlv-tools' }, [
+      h('button', { class: 'btn btn--sm', onclick: () => addRow({}, 'product_search') },
+        '＋ 新增一行'),
+      dtStat,
+    ]);
+
+    const errBox = h('div', { class: 'dlv-err', id: 'dlv-err' });
+
+    const body = h('div', {}, [
+      errBox,
+      h('div', { class: 'dlv-sec' }, [
+        h('div', { class: 'dlv-sec__title' }, '整单信息'),
+        mainGrid,
+      ]),
+      h('div', {}, [dtHead, dtHost, dtTools, dtNote]),
+    ]);
+
+    const saveBtn = h('button', { class: 'btn btn--primary' }, requestNo ? '保存修改' : '提交申请');
+    const modal = openModal({
+      title: requestNo ? `编辑发货申请 ${requestNo}` : '新建发货申请',
+      wide: true, body,
+      footer: [
+        h('button', { class: 'btn', onclick: () => modal.close() }, '取消'),
+        saveBtn,
+      ],
+      onClose: () => { closePicker(); },
+    });
+
+    function fail(msg, focusEl) {
+      errBox.innerHTML = msg;
+      errBox.classList.add('on');
+      // scrollIntoView 在 jsdom 里不存在（真实浏览器有）—— 不保护的话，
+      // 这个异常会从按钮的 click 事件里抛出，把 DOM 校验进程直接打崩，
+      // 后面所有断言都跑不到。同类调用（候选面板那一处）早就加了保护。
+      if (errBox.scrollIntoView) {
+        try { errBox.scrollIntoView({ block: 'nearest' }); } catch (e) { /* 忽略 */ }
+      }
+      if (focusEl) focusEl.focus();
+      return false;
+    }
+
+    function validate() {
+      const problems = [];
+      const header = {
+        turbine_vendor: (vendorBox.getValue() || '').trim(),
+        project_site: (siteBox.getValue() || '').trim(),
+        expect_ship_date: (dateEl.value || '').trim(),
+        ship_address: (addrEl.value || '').trim(),
+        ship_contact: (contactEl.value || '').trim(),
+        ship_phone: (phoneEl.value || '').trim(),
+        replace_reason: (reasonEl.value || '').trim(),
+        express_req: (expressEl.value || '').trim(),
+      };
+      const need = [
+        ['turbine_vendor', vendorBox], ['project_site', siteBox],
+        ['expect_ship_date', dateEl], ['ship_address', addrEl],
+        ['ship_contact', contactEl], ['ship_phone', phoneEl],
+        ['replace_reason', reasonEl], ['express_req', expressEl],
+      ];
+      need.forEach(([name, el]) => {
+        if (!header[name]) problems.push(`「${LABEL(name)}」`);
+      });
+      if (header.ship_phone && !/^(1[3-9]\d{9}|0\d{2,3}-?\d{7,8}(-\d{1,5})?)$/.test(header.ship_phone)) {
+        problems.push('「电话」格式不对（手机 11 位，或座机写「区号-号码」）');
+      }
+
+      // 明细：产品必须已从候选中选定（与后端同一口径）
+      rows.forEach(r => { r._badProduct = false; r._badQty = false; });
+      const itemProblems = [];
+      rows.forEach((r, i) => {
+        if (!String(r._search || '').trim()) {
+          r._badProduct = true;
+          itemProblems.push(`明细「第 ${i + 1} 行 产品」`);
+        } else if (!r.picked) {
+          r._badProduct = true;
+          itemProblems.push(`明细「第 ${i + 1} 行 产品（还没从候选中选定）」`);
+        }
+        const q = Number(r.qty);
+        if (r.qty === '' || isNaN(q) || q < 1 || Math.floor(q) !== q) {
+          r._badQty = true;
+          itemProblems.push(`明细「第 ${i + 1} 行 数量」`);
+        }
+      });
+      renderTable();
+      updateNote();
+
+      const all = problems.concat(itemProblems);
+      if (all.length) {
+        const target = problems.length ? need.find(([n]) => !header[n]) : null;
+        return { ok: false, msg: `还有 ${all.length} 项需要修正：${all.join('、')}。`
+          + '带 * 的是必填项，请补齐后再提交。',
+          focusEl: target ? target[1] : null };
+      }
+      const items = rows.map(r => ({
+        material_no: r.material_no || '',
+        product_model: r.product_model || '',
+        product_name: r.product_name || '',
+        spec: r.spec || '',
+        qty: Number(r.qty),
+        need_return: !!r.need_return,
+      }));
+      return { ok: true, header, items };
+    }
+
+    async function save() {
+      const v = validate();
+      if (!v.ok) { fail(v.msg, v.focusEl); return; }
+      saveBtn.disabled = true;
+      saveBtn.textContent = '提交中…';
+      try {
+        if (requestNo) {
+          await api('/delivery/requests/' + encodeURIComponent(requestNo),
+            { method: 'PUT', body: { header: v.header, items: v.items } });
+          toast('已保存 ' + requestNo, 'success');
+        } else {
+          const res = await api('/delivery/requests',
+            { method: 'POST', body: { header: v.header, items: v.items } });
+          toast('已提交，申请单号 ' + res.request_no, 'success');
+        }
+        modal.close();
+        loadList();
+      } catch (e) {
+        const msg = (e.detail && e.detail.message) ? e.detail.message
+          : (typeof e.detail === 'string' ? e.detail : e.message);
+        fail('提交失败：' + escapeHtml(msg));
+      } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = requestNo ? '保存修改' : '提交申请';
+      }
+    }
+    saveBtn.addEventListener('click', save);
+
+    // 弹窗内的键盘快捷键：Alt+Enter 提交（避免误触，不占用普通回车）
+    body.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && (e.altKey || e.ctrlKey)) { e.preventDefault(); save(); }
+    });
+
+    setTimeout(() => {
+      const first = vendorBox.querySelector ? vendorBox.querySelector('input') : null;
+      if (first) first.focus();
+    }, 60);
+  }
+
+  /* ================= 启动 ================= */
+  // 首屏渲染放在最后：上面的函数依赖本文件中后置声明的 let/const，
+  // 提前调用会触发 TDZ 错误并中断整个 IIFE（本项目记录过的坑）。
+  await loadList();
+  kwInput.focus();
+})();
+</script>
+</body>
+</html>

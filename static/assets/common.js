@@ -120,11 +120,15 @@ function num(v, digits = 0) {
 }
 
 /* ---------------- 状态标签 ---------------- */
+/* 完结状况只有两态：已完结 / 未完结。
+   ⚠️ 判「已完结」必须**严格等**，不能用子串判断 —— 「未完结」里也含「完结」
+   这两个字，用 includes 找「完结」会把未完结渲染成绿色的「已完成」。
+   空值兜底也按「未完结」显示（后端已归一，这里只是双保险，别再显示「未填写」——
+   那会让同一列出现第三种说法，用户会以为数据没填）。 */
 function completionTag(v) {
   const s = String(v || '').trim();
-  if (!s) return h('span', { class: 'tag' }, '未填写');
-  if (s.includes('完结')) return h('span', { class: 'tag tag--success' }, s);
-  return h('span', { class: 'tag tag--warning' }, s);
+  if (s === '已完结') return h('span', { class: 'tag tag--success' }, s);
+  return h('span', { class: 'tag tag--warning' }, s || '未完结');
 }
 
 function matchTag(mode) {
@@ -191,16 +195,10 @@ async function loadIdentity(force = false) {
 /** 是否处于「首次登录必须改密」状态。 */
 function mustChangePassword() { return PENDING_PWD_CHANGE; }
 
-const PERM_LABELS_LOCAL = {
-  'page.index': '工作台', 'page.scan': '退回登记', 'page.inspect': '检测登记',
-  'page.handle': '处理登记', 'page.query': '明细查询', 'page.dashboard': '数据看板',
-  'page.items': '匹配数据库', 'page.api': '数据接口', 'page.auth': '权限设置',
-  'act.create': '新增登记', 'act.edit': '修改明细与照片', 'act.delete': '删除明细',
-  'act.export': '导出数据', 'act.items': '物料维护', 'act.openapi': '数据接口配置',
-  'act.user': '用户与权限组管理', 'act.settings': '系统开关',
-};
-
-/** 当前用户是否拥有某权限点。未启用鉴权时一律放行。 */
+/* 权限点的中文名在这里**不放一份** —— 单一来源是后端 core/auth.py 的
+   PERMISSION_GROUPS，前端通过 GET /api/auth/groups 的 permission_groups 取用。
+   曾经在这里放过一份 PERM_LABELS_LOCAL，但全仓无引用（且每加一个权限点就要
+   同步改两处），2026-09-21 加发货申请权限点时删掉。 *//** 当前用户是否拥有某权限点。未启用鉴权时一律放行。 */
 function hasPerm(key) {
   if (!AUTH_ENABLED) return true;
   if (!CURRENT_USER) return false;
@@ -454,8 +452,21 @@ async function fetchCandidates(f, kw) {
   const text = String(kw || '').trim();
   if (text.length < 2) return [];
   if (f.source === 'items') {
-    const res = await api(`/items/search?kw=${encodeURIComponent(text)}&limit=20`);
-    return res.items || [];
+    /* 匹配数据库两条路（2026-09-22 分流）：
+       · `match_any`（料号格）：`/items/search` 任意列匹配、返回整条物料 ——
+         找料号时允许按品名 / 型号搜（用户常常只记得品名，不能只搜料号列）；
+       · 其余（型号 / 类别 / 品名 / 规格…）：`/items/options` **按该字段对应的列**
+         匹配再去重 —— 「型号」格的候选必须得是型号值本身，
+         否则拿 `search_items` 的返回（value 恒为料号）会填出一堆料号。
+         字段→列的映射在后端 `repository.ITEM_FIELD_COL`（含两处反直觉口径：
+         产品型号 = 匹配库 spec；产品类别的类别信息在 production_stat 列）。 */
+    if (f.match_any) {
+      const res = await api(`/items/search?kw=${encodeURIComponent(text)}&limit=20`);
+      return res.items || [];
+    }
+    const res = await api(`/items/options?field=${encodeURIComponent(f.name)}`
+      + `&kw=${encodeURIComponent(text)}&limit=20`);
+    return res.options || [];
   }
   const res = await api(`/dict/${encodeURIComponent(f.name)}`
     + `?keyword=${encodeURIComponent(text)}&limit=30`);
@@ -472,13 +483,42 @@ async function fetchCandidates(f, kw) {
 function fixedSelect({ name, value = '', options = [], onChange, placeholder = '请选择' }) {
   const sel = h('select', { class: 'input', dataset: { field: name } }, [
     placeholder === null ? null : h('option', { value: '' }, placeholder),
-    ...options.map(o => h('option', {
-      value: o, selected: o === value ? 'selected' : null,
-    }, o)),
+    // 选项支持两种写法：
+    //   字符串      —— 值即标签（现有几个页面都是这种，如 '已处理' / '待处理'）
+    //   {value,label} —— 值需要与显示不同时用（如发货状态 value=submitted、label=已提交）
+    // 2026-09-21 加发货申请时补的对象写法；字符串路径的行为完全不变。
+    ...options.map(o => {
+      const v = (o && typeof o === 'object') ? o.value : o;
+      const t = (o && typeof o === 'object') ? (o.label ?? o.value) : o;
+      return h('option', {
+        value: v, selected: String(v) === String(value) ? 'selected' : null,
+      }, t);
+    }),
   ]);
   if (onChange) sel.addEventListener('change', () => onChange(sel.value));
   sel.getValue = () => sel.value.trim();
   sel.setValue = v => { sel.value = v ?? ''; };
+  /* ★ 与 combobox 对齐：两个下拉构造器的方法面必须一致。
+     原来 fixedSelect 只有 getValue/setValue、没有 setOptions，于是页面里那句
+     `if (sel.setOptions) sel.setOptions(opts)` 永远为假 —— 候选值从服务器取回来
+     被静默丢掉，下拉只剩一个占位项、一个也筛不了
+     （2026-09-21「发货明细筛选项无法筛选」就是这么来的）。
+     运行时守卫在 tests/check_ui.js，源头守卫在 tests/check_frontend.js 第 [11] 段。 */
+  sel.setOptions = list => {
+    const keep = sel.value;
+    const fresh = (list || []).map(o => {
+      const v = (o && typeof o === 'object') ? o.value : o;
+      const t = (o && typeof o === 'object') ? (o.label ?? o.value) : o;
+      return h('option', { value: v }, t);
+    });
+    // replaceChildren 会把 null 变成字符串 'null'，占位项得自己判空
+    const kids = placeholder === null
+      ? [] : [h('option', { value: '' }, placeholder)];
+    kids.push(...fresh);
+    sel.replaceChildren(...kids);
+    sel.value = fresh.some(o => String(o.value) === String(keep)) ? keep : '';
+    return sel;
+  };
   return sel;
 }
 
@@ -724,11 +764,26 @@ const NAV_ITEMS = [
   { key: 'query', href: '/query.html', label: '明细查询', perm: 'page.query', icon: 'M11 4a7 7 0 100 14 7 7 0 000-14zM20 20l-4-4' },
   { key: 'dashboard', href: '/dashboard.html', label: '数据看板', perm: 'page.dashboard', icon: 'M4 19V5M4 19h16M8 19v-6M12 19V9M16 19v-3' },
   { key: 'items', href: '/items.html', label: '匹配数据库', perm: 'page.items', icon: 'M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zM4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3' },
+  // 发货管理四件套（①②③④ 均已落地）。
+  { key: 'delivery-apply', href: '/delivery-apply.html', label: '发货申请', perm: 'page.delivery_apply', icon: 'M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4' },
+  { key: 'delivery-pending', href: '/delivery-pending.html', label: '待发货清单', perm: 'page.delivery_pending', icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01' },
+  { key: 'delivery-track', href: '/delivery-track.html', label: '发货跟踪', perm: 'page.delivery_track', icon: 'M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0zM13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10a1 1 0 001 1h1m8-1a1 1 0 01-1 1H9m4-1V8a1 1 0 011-1h2.586a1 1 0 01.707.293l3.414 3.414a1 1 0 01.293.707V16a1 1 0 01-1 1h-1m-6-1a1 1 0 001 1h1' },
+  { key: 'delivery-ledger', href: '/delivery-ledger.html', label: '核销台账', perm: 'page.delivery_ledger', icon: 'M9 7h6m-6 4h6m-6 4h4M5 3h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2z' },
+  // 发货明细：ERP 出货明细的本地镜像。它不是「发货管理」的第五步 ——
+  // 前四件套讲的是我们自己发了哪些货，这一页是 ERP 里记了哪些货，
+  // 两者对不上时以谁为准要靠人去判，所以刻意不用同一个图标。
+  { key: 'delivery-detail', href: '/delivery-detail.html', label: '发货明细', perm: 'page.delivery_detail', icon: 'M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01' },
 ];
 
 // 系统管理入口：原来只有「同步设置」，现拆为「数据接口」（对外拉取配置）
 // 与「权限设置」（登录/权限组/用户/开关）。
 const NAV_SECOND = [
+  // 两个 ERP 数据源（匹配库 / 发货明细）的自动同步进度集中在这里 ——
+  // 两个业务页面上原来各有一张同步卡，2026-09-22 撤掉了（业务页只留业务数据）。
+  { key: 'sync-tasks', href: '/sync-tasks.html', label: '自动同步任务', perm: 'page.sync_tasks', icon: 'M4 4v6h6M20 20v-6h-6M20 9A8 8 0 006.3 5.7L4 8M4 15a8 8 0 0013.7 3.3L20 16' },
+  // 回收站：2026-09-23 起删除不再「一去不回」—— 删掉的明细 / 核销记录 /
+  // 物料先落这里，保留期内可还原；运维性质，默认只给管理员。
+  { key: 'recycle', href: '/recycle.html', label: '回收站', perm: 'page.recycle', icon: 'M4 7h16M9.5 7V5.2A1.2 1.2 0 0110.7 4h2.6a1.2 1.2 0 011.2 1.2V7M6.5 7l.9 12.1A1.9 1.9 0 009.3 21h5.4a1.9 1.9 0 001.9-1.9L17.5 7M10.2 11v6M13.8 11v6' },
   { key: 'api', href: '/api.html', label: '数据接口', perm: 'page.api', icon: 'M4 12a8 8 0 0113.7-5.6M20 12a8 8 0 01-13.7 5.6M17 3v4h-4M7 21v-4h4' },
   { key: 'auth', href: '/auth.html', label: '权限设置', perm: 'page.auth', icon: 'M12 3l7.5 3.2v5c0 4.4-3.1 8.2-7.5 9.3-4.4-1.1-7.5-4.9-7.5-9.3v-5zM9.2 12.2l1.9 1.9 3.7-3.7' },
 ];
@@ -755,7 +810,7 @@ function renderSidebar(activeKey) {
       // 主图标 = 公司商标的图形部分（不带下方文字：这里只有 26px，
       // 带文字必糊）。图形是亮蓝 #0080c8 —— 2026-09-20 侧栏由深色改浅色后
       // 重新核对过：亮蓝压在 #f6f8fa 上对比度约 3.6:1，达到图形类元素的门槛。
-      h('img', { class: 'sidebar__logo', src: '/static/assets/logo.png?v=20260920f',
+      h('img', { class: 'sidebar__logo', src: '/static/assets/logo.png?v=20260921g',
                  alt: '贝良', width: 26, height: 26 }),
       h('div', {}, [
         h('div', { class: 'sidebar__title' }, '售后返件系统'),

@@ -15,7 +15,6 @@
     【跨库组合】明细拼接查询、统计、关键词检索、导出、扫码匹配
 """
 import json
-import sqlite3
 import threading
 from datetime import datetime
 
@@ -23,14 +22,17 @@ from config import (CARRIER_PREFIX_RULES, CODE_PERIOD_CENTURY,
                     CODE_PERIOD_MONTH_SUFFIX, CODE_PERIOD_PREFIX_LEN,
                     DICT_FIELDS, DICT_OPTION_LIMIT, FIELD_LABELS,
                     HANDLE_DEFAULT_VALUES, HANDLE_DICT_FIELDS,
-                    HANDLE_DONE_VALUES, INSPECT_DICT_FIELDS, LINE_NO_WIDTH,
+                    HANDLE_DONE_VALUES, INSPECT_DEFAULT_VALUES,
+                    INSPECT_DICT_FIELDS, LINE_NO_WIDTH,
                     MATCH_FIELDS, MATCH_FUZZY_ENABLED, ORDER_NO_SEQ_WIDTH,
                     ORDER_NO_TOTAL_LEN, PERIOD_UNKNOWN, RETURNS_DICT_FIELDS)
 from core.db import (HANDLE_COLUMNS, INSPECT_COLUMNS, InvalidField, get_conn,
                      tx)
+from core import dbapi
 from core import repo_handle
 from core import repo_inspect
 from core import photos
+from core import recycle
 
 # 各库所属字段（决定跨库查询时挂 r. / i. / h. 前缀）
 INSPECT_FIELD_SET = set(INSPECT_COLUMNS)
@@ -46,7 +48,7 @@ ALLOWED_FIELDS = {
     "test_date", "feedback_issue", "test_result", "fault_cause", "improvement",
     "solution", "issue_category", "responsibility", "photo_evidence",
     "report_no", "analysis_report", "erp_handled", "handle_solution",
-    "info_source", "completion", "source", "sync_state", "id",
+    "info_source", "completion", "source", "id",
 }
 
 # 新增字段时**必须**同步登记进上面这个白名单。
@@ -55,7 +57,7 @@ ALLOWED_FIELDS = {
 # 报错信息还指向一个和搜索无关的地方。（handle_solution 就踩过。）
 
 # 登记表单允许写入退回登记库的字段
-WRITABLE_FIELDS = ALLOWED_FIELDS - {"id", "detail_key", "sync_state"}
+WRITABLE_FIELDS = ALLOWED_FIELDS - {"id", "detail_key"}
 
 # 其中落退回登记库的部分（检测字段写 inspect.db、处理字段写 handle.db，
 # 两处都要扣除 —— 漏扣会让该字段被当成退回侧字段塞进 returns 表）
@@ -89,6 +91,13 @@ _DETAIL_FROM = ("FROM returns r "
 
 # 检测进度判定片段。注意 LEFT JOIN 未命中时检测侧为 NULL，
 # 而 `NULL NOT LIKE '%完结%'` 结果是 NULL（不成立），必须用 COALESCE 兜住。
+#
+# ⚠️⚠️ 这里必须用**裸列** `i.completion`，**不许**改成 `_value_expr('completion')`！
+# 读取层会把空值归一成「未完结」（`INSPECT_DEFAULT_VALUES`），而
+# **「未完结」这三个字里含「完结」** —— 归一后的值拿去 LIKE '%完结%' 会判成 true，
+# 于是所有未完结的明细都会被算成「已完结」。存储层与展示层在这里刻意分家：
+#   存储层：已完结 = '已完结'，未完结 = 空值 → `NOT LIKE '%完结%'` 成立；
+#   展示层：空值归一为「未完结」→ 只有「严格等 '已完结'」才判得对。
 _PENDING_SQL = ("(i.detail_key IS NULL "
                 " OR TRIM(COALESCE(i.completion, '')) = '' "
                 " OR i.completion NOT LIKE '%完结%')")
@@ -132,6 +141,17 @@ def _safe_field(name: str) -> str:
 def _qualify(name: str) -> str:
     """给字段加上所属库的别名前缀，供跨库查询使用。"""
     _safe_field(name)
+    # detail_key 三张表都有（它同时挂在 INSPECT_COLUMNS 和 HANDLE_COLUMNS 上），
+    # 但**权威归属是退回登记库** —— 先拦这一条，否则会走下面的 HANDLE 分支：
+    #
+    # ⚠️ 2026-09-22 实测的坑：处理登记库是稀疏存储（只有 100 行 vs 明细 5637 行），
+    # 新登记的明细在 handle_records 里根本没有行，h.detail_key 是 NULL，
+    # `NULL LIKE ...` 不成立 —— 于是「用明细唯一键搜索/筛选」永远查不到任何记录，
+    # `ORDER BY h.detail_key` 也会把绝大多数行的排序键变成 NULL。
+    # 这些路径都不报错，只是安静地返回空结果。
+    # r.detail_key 是主表自己的列，永远非空，所以在三条路径上都是对的。
+    if name == "detail_key":
+        return "r.detail_key"
     if name in HANDLE_FIELD_SET:
         return f"h.{name}"
     return f"i.{name}" if name in INSPECT_FIELD_SET else f"r.{name}"
@@ -146,21 +166,29 @@ def _value_expr(field: str) -> str:
     （空 / 待处理 / 查不到），而且都不报错。
     """
     col = _qualify(field)
-    dft = HANDLE_DEFAULT_VALUES.get(field)
+    dft = (HANDLE_DEFAULT_VALUES.get(field)
+           or INSPECT_DEFAULT_VALUES.get(field))
     if not dft:
         return col
     # dft 来自 config 的代码级常量，不是用户输入，可以直接内联
     return f"COALESCE(NULLIF(TRIM({col}), ''), '{dft}')"
 
 
+# 有「空值归一」的字段（处理侧 + 检测侧）。读列与筛选都要用它判断，
+# 别只查 HANDLE_DEFAULT_VALUES —— 那样新增字段时会静默漏掉归一。
+_DEFAULT_VALUES = {**HANDLE_DEFAULT_VALUES, **INSPECT_DEFAULT_VALUES}
+
 # 明细查询要取的列：退回侧全部 + 检测侧 11 列 + 处理侧 2 列（不含 detail_key，避免重名）。
-# 处理侧字段带空值归一 —— 见 _value_expr。
+# 带归一的字段走 _value_expr，其余用裸列名 —— 见 _value_expr 的说明。
 _DETAIL_COLS = ("r.*, "
-                + ", ".join(f"i.{c}" for c in INSPECT_COLUMNS)
+                + ", ".join(
+                    (f"{_value_expr(c)} AS {c}"
+                     if c in _DEFAULT_VALUES else f"i.{c}")
+                    for c in INSPECT_COLUMNS)
                 + ", "
                 + ", ".join(
                     (f"{_value_expr(c)} AS {c}"
-                     if c in HANDLE_DEFAULT_VALUES else f"h.{c}")
+                     if c in _DEFAULT_VALUES else f"h.{c}")
                     for c in HANDLE_COLUMNS))
 
 
@@ -190,7 +218,7 @@ def _is_detail_key_conflict(exc: BaseException) -> bool:
     笼统地捕获 IntegrityError 只会白转几圈再报同一个错，还会把真实错误
     掩盖成「单号被占用」。
     """
-    return isinstance(exc, sqlite3.IntegrityError) and "detail_key" in str(exc)
+    return dbapi.is_duplicate(exc, "detail_key")
 
 
 def next_order_no(day: str = "") -> str:
@@ -203,7 +231,10 @@ def next_order_no(day: str = "") -> str:
     prefix = f"{day[2:4]}{day[5:7]}{day[8:10]}"
     conn = get_conn()
     row = conn.execute(
-        "SELECT MAX(CAST(substr(order_no, 7, ?) AS INTEGER)) AS m FROM returns "
+        # ⚠️ MySQL 没有 CAST(... AS INTEGER)，整数要用 SIGNED / UNSIGNED。
+        # 非数字串会被转成 0 并带一条 warning（SQLite 的 CAST 也是 0）——单号
+        # 后三位都是数字，这个宽松行为正是想要的，别升级成严格校验。
+        "SELECT MAX(CAST(substr(order_no, 7, ?) AS SIGNED)) AS m FROM returns "
         "WHERE order_no LIKE ? AND LENGTH(order_no) = ?;",
         (ORDER_NO_SEQ_WIDTH, prefix + "%", ORDER_NO_TOTAL_LEN),
     ).fetchone()
@@ -253,17 +284,17 @@ def upsert_model(model_data: dict) -> None:
                 production_stat, product_category, category_l1, category_l2,
                 category_l3, updated_at)
                VALUES (?,?,?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(product_model) DO UPDATE SET
-                 product_code    = COALESCE(excluded.product_code,    product_code),
-                 material_no     = COALESCE(excluded.material_no,     material_no),
-                 product_name    = COALESCE(excluded.product_name,    product_name),
-                 spec            = COALESCE(excluded.spec,            spec),
-                 production_stat = COALESCE(excluded.production_stat, production_stat),
-                 product_category= COALESCE(excluded.product_category,product_category),
-                 category_l1     = COALESCE(excluded.category_l1,     category_l1),
-                 category_l2     = COALESCE(excluded.category_l2,     category_l2),
-                 category_l3     = COALESCE(excluded.category_l3,     category_l3),
-                 updated_at      = excluded.updated_at;""",
+               ON DUPLICATE KEY UPDATE
+                 product_code    = COALESCE(VALUES(product_code),    product_code),
+                 material_no     = COALESCE(VALUES(material_no),     material_no),
+                 product_name    = COALESCE(VALUES(product_name),    product_name),
+                 spec            = COALESCE(VALUES(spec),            spec),
+                 production_stat = COALESCE(VALUES(production_stat), production_stat),
+                 product_category= COALESCE(VALUES(product_category),product_category),
+                 category_l1     = COALESCE(VALUES(category_l1),     category_l1),
+                 category_l2     = COALESCE(VALUES(category_l2),     category_l2),
+                 category_l3     = COALESCE(VALUES(category_l3),     category_l3),
+                 updated_at      = VALUES(updated_at);""",
             (model,
              model_data.get("product_code"), model_data.get("material_no"),
              model_data.get("product_name"), model_data.get("spec"),
@@ -303,8 +334,8 @@ def list_models(keyword: str = "", limit: int = 2000) -> list:
     if keyword:
         kw = f"%{_escape_like(keyword)}%"
         rows = conn.execute(
-            "SELECT * FROM model_dict WHERE product_model LIKE ? ESCAPE '\\' "
-            "OR product_name LIKE ? ESCAPE '\\' OR product_code LIKE ? ESCAPE '\\' "
+            "SELECT * FROM model_dict WHERE product_model LIKE ? ESCAPE '\\\\' "
+            "OR product_name LIKE ? ESCAPE '\\\\' OR product_code LIKE ? ESCAPE '\\\\' "
             "ORDER BY product_model LIMIT ?;", (kw, kw, kw, limit)
         ).fetchall()
     else:
@@ -336,6 +367,20 @@ ITEM_SEARCH_FIELDS = [
 # 匹配优先级：料号 → 旧料号 → 规格 → 型号
 ITEM_MATCH_FIELDS = ["material_no", "old_material_no", "spec", "model_no"]
 
+# **产品信息字段 → 匹配库的列**（2026-09-22）。
+# 口径照 README，两处反直觉：
+#   · 退回登记的「产品型号」= 匹配库的 `spec`（不是 `model_no`，那是 BLF1-S 系列号）；
+#   · 「产品类别」的类别信息在 `production_stat` 列（名为 category 的那列是空的）。
+# 有了它，「型号 / 类别」格也能直接从匹配库取候选，而不只是在历史值里翻。
+ITEM_FIELD_COL = {
+    "material_no": "material_no",
+    "product_model": "spec",
+    "product_category": "production_stat",
+    "product_name": "product_name",
+    "spec": "spec",
+    "production_stat": "production_stat",
+}
+
 
 def _safe_item_field(name: str) -> str:
     if name not in ITEM_COLUMNS:
@@ -363,7 +408,7 @@ def _item_where(keyword: str, filters: dict):
 
     if keyword:
         kw = f"%{_escape_like(keyword)}%"
-        sub = " OR ".join(f"{f} LIKE ? ESCAPE '\\'" for f in ITEM_SEARCH_FIELDS)
+        sub = " OR ".join(f"{f} LIKE ? ESCAPE '\\\\'" for f in ITEM_SEARCH_FIELDS)
         clauses.append(f"({sub})")
         params.extend([kw] * len(ITEM_SEARCH_FIELDS))
 
@@ -462,10 +507,12 @@ def upsert_item(data: dict, operator: str = "") -> dict:
 
 def delete_item(item_id: int, operator: str = "") -> int:
     with tx() as conn:
-        row = conn.execute("SELECT material_no FROM items_db.item_master WHERE id = ?;",
+        row = conn.execute("SELECT * FROM items_db.item_master WHERE id = ?;",
                            (item_id,)).fetchone()
         if not row:
             return 0
+        # 物料同样进回收站：ERP 同步是整表覆盖，手工删错一条要能捞回来
+        recycle.snapshot_item(conn, [row], operator)
         changed = conn.execute("DELETE FROM items_db.item_master WHERE id = ?;",
                                (item_id,)).rowcount
         conn.execute(
@@ -475,17 +522,85 @@ def delete_item(item_id: int, operator: str = "") -> int:
         return changed
 
 
+def _fill_keys(payload: dict, current: dict) -> list:
+    """fill 模式真正要写的字段：导入值非空、且本地当前为空。
+
+    两端都要判「空」：
+      · 导入值空 —— 写了等于把本地已有值抹掉（upsert 模式就是这样执行的，
+        2026-09-22 实测：ERP 只给三列，一跑就把本地人工整理的品名清成空）；
+      · 本地已有值 —— 不覆盖。本地那份是人工整理过的，与 core/erp_sync.py 里
+        「类别只补空、不覆盖」是同一条原则。
+    """
+    keys = []
+    for k, v in payload.items():
+        if k == "material_no":
+            continue
+        if v is None or not str(v).strip():
+            continue
+        if str(current.get(k) or "").strip():
+            continue
+        keys.append(k)
+    return keys
+
+
+def plan_item_fill(rows: list) -> dict:
+    """空转：fill 模式会补哪些字段、改多少行，一条都不写。
+
+    与 import_items(mode="fill") 共用 _fill_keys —— 空转与实跑各判一次的话，
+    两边早晚会不一致（外面看到「会补 9000 行」，跑完只补了 8000）。
+    """
+    conn = get_conn()
+    cols = ", ".join(_safe_item_field(k) for k in ITEM_FIELDS)
+    current = {}
+    for r in conn.execute(f"SELECT {cols} FROM items_db.item_master;").fetchall():
+        d = dict(r)
+        current[(d.get("material_no") or "").strip()] = d
+
+    fields: dict = {}
+    samples: list = []
+    new = changed = 0
+    for raw in rows:
+        payload = {k: (str(v).strip() if v is not None else None)
+                   for k, v in (raw or {}).items() if k in ITEM_FIELDS}
+        material_no = (payload.get("material_no") or "").strip()
+        if not material_no:
+            continue
+        if material_no not in current:
+            new += 1
+            continue
+        keys = _fill_keys(payload, current[material_no])
+        if not keys:
+            continue
+        changed += 1
+        for k in keys:
+            fields[k] = fields.get(k, 0) + 1
+        if len(samples) < 5:
+            samples.append({"material_no": material_no,
+                            "fields": {k: payload[k] for k in keys}})
+    return {"rows": len(rows), "new": new, "changed": changed,
+            "fields": fields, "samples": samples}
+
+
 def import_items(rows: list, operator: str = "", mode: str = "upsert") -> dict:
     """批量导入物料主档。
 
     mode = "upsert"  按料号覆盖已有、新增缺失（默认）
     mode = "replace" 先清空整表再导入
+    mode = "fill"    只补空字段：本地已有值一律不动，导入值为空的也不写入。
+                     全量补数用这个 —— upsert 会把本地人工整理的字段
+                     （品名/型号/规格）覆盖成 ERP 那份（可能为空）的值。
     """
     now = _now()
-    inserted = updated = skipped = 0
+    inserted = updated = unchanged = skipped = 0
     with tx() as c:
         if mode == "replace":
             c.execute("DELETE FROM items_db.item_master;")
+        current = {}
+        if mode == "fill":
+            cols = ", ".join(_safe_item_field(k) for k in ITEM_FIELDS)
+            for r in c.execute(f"SELECT {cols} FROM items_db.item_master;").fetchall():
+                d = dict(r)
+                current[(d.get("material_no") or "").strip()] = d
         for raw in rows:
             payload = {}
             for k, v in (raw or {}).items():
@@ -500,7 +615,10 @@ def import_items(rows: list, operator: str = "", mode: str = "upsert") -> dict:
             exists = c.execute("SELECT id FROM items_db.item_master WHERE material_no = ?;",
                                (material_no,)).fetchone()
             if exists:
-                keys = [k for k in payload if k != "material_no"]
+                if mode == "fill":
+                    keys = _fill_keys(payload, current.get(material_no) or {})
+                else:
+                    keys = [k for k in payload if k != "material_no"]
                 if keys:
                     payload["updated_at"] = now
                     sets = ", ".join(f"{_safe_item_field(k)} = ?" for k in keys)
@@ -508,7 +626,9 @@ def import_items(rows: list, operator: str = "", mode: str = "upsert") -> dict:
                         f"UPDATE items_db.item_master SET {sets}, updated_at = ? "
                         f"WHERE material_no = ?;",
                         [payload[k] for k in keys] + [now, material_no])
-                updated += 1
+                    updated += 1
+                else:
+                    unchanged += 1
             else:
                 payload["created_at"] = now
                 payload["updated_at"] = now
@@ -518,8 +638,8 @@ def import_items(rows: list, operator: str = "", mode: str = "upsert") -> dict:
                 c.execute(f"INSERT INTO items_db.item_master ({cols}) VALUES ({marks});",
                           list(payload.values()))
                 inserted += 1
-    return {"inserted": inserted, "updated": updated, "skipped": skipped,
-            "total": inserted + updated, "mode": mode}
+    return {"inserted": inserted, "updated": updated, "unchanged": unchanged,
+            "skipped": skipped, "total": inserted + updated, "mode": mode}
 
 
 def search_items(kw: str, limit: int = 20) -> list:
@@ -542,12 +662,12 @@ def search_items(kw: str, limit: int = 20) -> list:
         "SELECT material_no, old_material_no, product_name, model_no, spec, "
         "       production_stat "
         "  FROM items_db.item_master "
-        " WHERE material_no     LIKE ? ESCAPE '\\' "
-        "    OR old_material_no LIKE ? ESCAPE '\\' "
-        "    OR spec            LIKE ? ESCAPE '\\' "
-        "    OR model_no        LIKE ? ESCAPE '\\' "
-        "    OR product_name    LIKE ? ESCAPE '\\' "
-        " ORDER BY (material_no LIKE ? ESCAPE '\\') DESC, material_no "
+        " WHERE material_no     LIKE ? ESCAPE '\\\\' "
+        "    OR old_material_no LIKE ? ESCAPE '\\\\' "
+        "    OR spec            LIKE ? ESCAPE '\\\\' "
+        "    OR model_no        LIKE ? ESCAPE '\\\\' "
+        "    OR product_name    LIKE ? ESCAPE '\\\\' "
+        " ORDER BY (material_no LIKE ? ESCAPE '\\\\') DESC, material_no "
         " LIMIT ?;",
         (like, like, like, like, like, prefix, max(1, int(limit))),
     ).fetchall()
@@ -571,6 +691,54 @@ def search_items(kw: str, limit: int = 20) -> list:
     return out
 
 
+def item_options_by_field(field: str, kw: str, limit: int = 20) -> list:
+    """按**产品信息字段**从匹配库取候选：该列的**去重值** + 一行副标题。
+
+    与 `search_items` 的分工（别互相替代）：
+      · `search_items`：任意列模糊匹配、返回**整条物料** —— 用于「找料号」
+        （用户常常只记得品名，所以不能限定只搜料号列）；
+      · 本函数：**按目标列**匹配、按该列去重 —— 用于「型号 / 类别 / 品名」等格。
+        在「产品型号」格里输入 51177，候选必须是**型号值**（spec），
+        而不是一堆料号（`search_items` 的 value 恒为料号）；
+        类别同理：一类多料，候选只能是去重后的类别名。
+    """
+    col = ITEM_FIELD_COL.get(field)
+    if not col:
+        return []
+    text = str(kw or "").strip()
+    if not text:
+        return []
+    like = f"%{_escape_like(text)}%"
+    prefix = f"{_escape_like(text)}%"
+    lim = max(1, int(limit))
+    conn = get_conn()
+    # 先多取一批（去重前），按「以关键字开头」优先 + 值排序
+    rows = conn.execute(
+        f"SELECT `{col}` AS value, material_no, product_name, model_no, spec "
+        "  FROM items_db.item_master "
+        f" WHERE `{col}` LIKE ? ESCAPE '\\\\' "
+        f" ORDER BY (`{col}` LIKE ? ESCAPE '\\\\') DESC, `{col}` "
+        " LIMIT ?;",
+        (like, prefix, lim * 8),
+    ).fetchall()
+
+    out, seen = [], set()
+    for r in rows:
+        v = str(r["value"] or "").strip()
+        if not v or v in seen:
+            continue
+        seen.add(v)
+        # 副标题帮用户分辨同值行：品名 + 另一维（型号格补料号，其余补型号/规格）
+        second = (str(r["material_no"] or "").strip() if col == "spec"
+                  else str(r["spec"] or r["model_no"] or "").strip())
+        out.append({"value": v,
+                    "meta": " · ".join(x for x in
+                                       (str(r["product_name"] or "").strip(), second) if x)})
+        if len(out) >= lim:
+            break
+    return out
+
+
 def lookup_item(code: str):
     """按码反查物料主档：料号 → 旧料号 → 规格 → 型号，未命中再走模糊后缀。"""
     code = (code or "").strip()
@@ -591,7 +759,7 @@ def lookup_item(code: str):
         for field in ("material_no", "old_material_no", "spec"):
             row = conn.execute(
                 f"SELECT * FROM items_db.item_master WHERE {_safe_item_field(field)} "
-                f"LIKE ? ESCAPE '\\' LIMIT 1;", (f"%{esc}",)).fetchone()
+                f"LIKE ? ESCAPE '\\\\' LIMIT 1;", (f"%{esc}",)).fetchone()
             if row:
                 d = dict(row)
                 d["_matched_field"] = field
@@ -792,7 +960,7 @@ def match_code(code: str) -> dict:
                 _safe_field(field)
                 rows = conn.execute(
                     f"SELECT {_DETAIL_COLS} {_DETAIL_FROM} "
-                    f"WHERE r.{field} LIKE ? ESCAPE '\\' "
+                    f"WHERE r.{field} LIKE ? ESCAPE '\\\\' "
                     f"ORDER BY r.id DESC LIMIT 20;", (pattern,)
                 ).fetchall()
                 if rows:
@@ -878,7 +1046,7 @@ def create_return(data: dict, operator: str = "") -> dict:
         with _ORDER_SEQ_LOCK:
             try:
                 return _create_return_inner(data, operator)
-            except sqlite3.IntegrityError as exc:
+            except dbapi.IntegrityError as exc:
                 if (not _is_detail_key_conflict(exc)
                         or _attempt >= _ORDER_RETRY - 1):
                     # 撞了别的唯一约束，或重试次数用尽 —— 转成登记员看得懂的话
@@ -921,7 +1089,6 @@ def _create_return_inner(data: dict, operator: str = "") -> dict:
     if operator:
         payload["registrar"] = operator
     payload["source"] = payload.get("source") or "local"
-    payload["sync_state"] = "pending"
     payload["created_at"] = now
     payload["updated_at"] = now
 
@@ -1090,7 +1257,8 @@ def find_duplicates(return_no: str, items: list) -> list:
 
 
 def create_returns_batch(header: dict, items: list, operator: str = "",
-                         allow_duplicate: bool = False) -> dict:
+                         allow_duplicate: bool = False,
+                         refresh_dict: bool = True) -> dict:
     """批量登记（对外入口）。
 
     整个流程放进单号临界区：归单 / 取行号 / 插入之间有竞争窗口 ——
@@ -1099,11 +1267,13 @@ def create_returns_batch(header: dict, items: list, operator: str = "",
     """
     with _ORDER_SEQ_LOCK:
         return _create_returns_batch_inner(header, items, operator,
-                                           allow_duplicate)
+                                           allow_duplicate,
+                                           refresh_dict=refresh_dict)
 
 
 def _create_returns_batch_inner(header: dict, items: list, operator: str = "",
-                                allow_duplicate: bool = False) -> dict:
+                                allow_duplicate: bool = False,
+                                refresh_dict: bool = True) -> dict:
     """批量登记：一个快递单号下逐行生成明细，一行对应一只产品。
 
     header —— 整单共享字段（退回单号、快递公司、退回时间、快递归属、
@@ -1179,7 +1349,6 @@ def _create_returns_batch_inner(header: dict, items: list, operator: str = "",
             if operator and not payload.get("registrar"):
                 payload["registrar"] = operator
             payload["source"] = "local"
-            payload["sync_state"] = "pending"
             payload["created_at"] = now
             payload["updated_at"] = now
 
@@ -1206,8 +1375,10 @@ def _create_returns_batch_inner(header: dict, items: list, operator: str = "",
     # 检测库写入同样放在事务外（各自独立事务）
     for row in created:
         if row["inspect"]:
-            repo_inspect.upsert(row["detail_key"], row["inspect"], operator)
-    refresh_dict_options()
+            repo_inspect.upsert(row["detail_key"], row["inspect"], operator,
+                                refresh_dict=refresh_dict)
+    if refresh_dict:
+        refresh_dict_options()
     return {
         "order_no": order_no,
         "is_new_order": is_new_order,
@@ -1256,7 +1427,7 @@ def update_return(detail_key: str, data: dict, operator: str = "") -> int:
                 if row and row["product_model"]:
                     old_models.append(row["product_model"])
             cur = conn.execute(
-                f"UPDATE returns SET {sets}, updated_at = ?, sync_state = 'pending' "
+                f"UPDATE returns SET {sets}, updated_at = ? "
                 f"WHERE detail_key = ?;",
                 list(returns_payload.values()) + [now, detail_key],
             )
@@ -1309,16 +1480,40 @@ def _warn_leftover_photos(keys) -> None:
               flush=True)
 
 
+def _trash_photos(keys, item_id) -> None:
+    """把明细的照片搬进回收站（**不是删除**），并把清单写进回收站记录。
+
+    照片删除不可逆，而记录是能还原的 —— 所以删除明细时照片只是搬到
+    `data/photos_trash/<回收站 id>/`，还原时搬回原位，彻底删除时才真删。
+    搬不动的文件留在原处：文件还在，还原时本来就无需搬回，因此只提示。
+    """
+    if not item_id:
+        # 没有回收站记录（旧调用路径 / 快照失败）：退回原来的直接清理
+        _warn_leftover_photos(keys)
+        return
+    moved = []
+    for k in keys:
+        moved.extend(photos.move_to_trash(k, item_id))
+    recycle.set_photos(item_id, moved)
+    left = sum(photos.count_files(k) for k in (keys or []))
+    if left:
+        print(f"[warn] {left} 个照片文件未能搬进回收站（可能被占用），"
+              f"已留在原位", flush=True)
+
+
 def delete_return(detail_key: str, operator: str = "") -> int:
-    """删除明细：其余三库的记录一并清理。"""
+    """删除明细：其余三库的记录一并清理，并整条进回收站（保留期内可还原）。"""
     removed_model = None
+    item_id = 0
     with tx() as conn:
         row = conn.execute(
-            "SELECT product_model FROM returns WHERE detail_key = ?;",
+            "SELECT * FROM returns WHERE detail_key = ?;",
             (detail_key,),
         ).fetchone()
         if row:
             removed_model = row["product_model"]
+            # 快照与删除在同一个事务里：不会出现「删了但没进回收站」
+            item_id = recycle.snapshot_returns(conn, [row], operator)
         cur = conn.execute("DELETE FROM returns WHERE detail_key = ?;", (detail_key,))
         conn.execute(
             "INSERT INTO op_log (action, detail_key, payload, operator, created_at) "
@@ -1334,7 +1529,7 @@ def delete_return(detail_key: str, operator: str = "") -> int:
         # 照片是磁盘文件，漏清就会留下永远访问不到的死图。
         refresh_dict_options()
         prune_model_dict([removed_model])
-        _warn_leftover_photos([detail_key])
+        _trash_photos([detail_key], item_id)
     return changed
 
 
@@ -1357,12 +1552,15 @@ def delete_returns(detail_keys, operator: str = "") -> dict:
 
     now = _now()
     marks = ", ".join("?" for _ in keys)
+    item_id = 0
     with tx() as conn:
         rows = conn.execute(
-            f"SELECT product_model FROM returns WHERE detail_key IN ({marks});",
+            f"SELECT * FROM returns WHERE detail_key IN ({marks});",
             keys,
         ).fetchall()
         removed_models = [r["product_model"] for r in rows if r["product_model"]]
+        # 整批算**一条**回收站记录：用户点了一次删除，还原也一次还原回去
+        item_id = recycle.snapshot_returns(conn, rows, operator)
 
         cur = conn.execute(
             f"DELETE FROM returns WHERE detail_key IN ({marks});", keys)
@@ -1384,7 +1582,7 @@ def delete_returns(detail_keys, operator: str = "") -> dict:
         prune_model_dict(removed_models)
         repo_inspect.refresh_dict_options()
         repo_handle.refresh_dict_options()
-        _warn_leftover_photos(keys)
+        _trash_photos(keys, item_id)
 
     return {"requested": len(keys), "deleted": deleted,
             "missing": len(keys) - deleted}
@@ -1405,7 +1603,7 @@ def _build_where(filters: dict, scope: str = ""):
     keyword = (filters.get("keyword") or "").strip()
     if keyword:
         kw = f"%{_escape_like(keyword)}%"
-        sub = " OR ".join(f"{_qualify(f)} LIKE ? ESCAPE '\\'" for f in KEYWORD_FIELDS)
+        sub = " OR ".join(f"{_qualify(f)} LIKE ? ESCAPE '\\\\'" for f in KEYWORD_FIELDS)
         clauses.append(f"({sub})")
         params.extend([kw] * len(KEYWORD_FIELDS))
 
@@ -1452,11 +1650,6 @@ def _build_where(filters: dict, scope: str = ""):
         clauses.append(_UNTESTED_SQL)
     if filters.get("handle_pending"):
         clauses.append(_HANDLE_PENDING_SQL)
-
-    # 同步状态
-    if filters.get("sync_state"):
-        clauses.append("r.sync_state = ?")
-        params.append(filters["sync_state"])
 
     # 看板口径：检测汇总只看已检测的明细
     if scope == "inspect":
@@ -1519,6 +1712,8 @@ def query_inspect_orders(filters: dict = None, page: int = 1, page_size: int = 5
 
     tested_expr = ("SUM(CASE WHEN TRIM(COALESCE(i.test_date, '')) <> '' "
                    "THEN 1 ELSE 0 END)")
+    # ⚠️ 裸列（不是 _value_expr）：理由见 _PENDING_SQL 上面的说明 ——
+    # 归一后的「未完结」含「完结」，拿去 LIKE 会把未完结算成已完结。
     done_expr = "SUM(CASE WHEN i.completion LIKE '%完结%' THEN 1 ELSE 0 END)"
 
     base = (
@@ -1529,7 +1724,7 @@ def query_inspect_orders(filters: dict = None, page: int = 1, page_size: int = 5
         f"  MIN(r.project_site)    AS project_site, "
         f"  MIN(r.return_date)     AS return_date, "
         f"  MIN(r.registered_at)   AS registered_at, "
-        f"  COUNT(*)               AS lines, "
+        f"  COUNT(*)               AS `lines`, "
         f"  {tested_expr}          AS tested, "
         f"  {done_expr}            AS done "
         f"{_DETAIL_FROM}{where} "
@@ -1541,7 +1736,7 @@ def query_inspect_orders(filters: dict = None, page: int = 1, page_size: int = 5
     conn = get_conn()
     total = conn.execute(
         f"SELECT COUNT(*) c FROM (SELECT r.order_no {_DETAIL_FROM}{where} "
-        f"GROUP BY r.order_no {having});", params
+        f"GROUP BY r.order_no {having}) g;", params
     ).fetchone()["c"]
 
     page = max(1, int(page or 1))
@@ -1601,14 +1796,25 @@ def query_handle_orders(filters: dict = None, page: int = 1, page_size: int = 50
                     f"'{_HANDLE_DONE}' THEN 1 ELSE 0 END)")
     tested_expr = ("SUM(CASE WHEN TRIM(COALESCE(i.test_date, '')) <> '' "
                    "THEN 1 ELSE 0 END)")
-    # 整单级「还有未处理的明细」—— 与行级口径 _HANDLE_PENDING_SQL 保持一致：
-    #   ① 未检测的行本身也算未处理（"已检测了但没处理"的判断不能漏掉它们）；
-    #   ② 但整单至少要有**一行检测过**，否则纯属还没送检的退回单会混进
-    #      「待处理清单」，与模块职责（检测之后的跟进）不符。
-    # 两个条件不重叠：全未检测且已处理数=0 只命中 ①，不命中 ②。
-    unhandled_expr = ("SUM(CASE WHEN TRIM(COALESCE(i.test_date, '')) = '' "
-                      f"OR TRIM(COALESCE(h.erp_handled, '')) <> "
+    # 整单级「还有未处理的明细」= **只看 ERP 处理状态**。
+    #
+    # ⚠️ 这里**不能**把「未检测」也算作「未处理」（2026-09-22 修）。曾经写成
+    # `i.test_date = '' OR h.erp_handled <> '已处理'`，于是「每行都已处理、
+    # 只是个别行没录检测时间」的单被判成还有未处理 —— 可界面上这单的状态标签
+    # 是绿色「已处理」、未处理数 0（`lines - handled`），用户看到的就是
+    # 「已经处理完的怎么还挂在『仅看未处理』里」。实测 5 单，全是这个形状。
+    #
+    # 「未检测」是**检测模块**的待办（`inspect_pending` / 检测页清单管它），
+    # 不是处理模块的待办 —— 处理登记是「检测之后的跟进」，别越界互相拿。
+    # 对照检测页 `query_inspect_orders`：那里未检测**必须**算待检（它的职责
+    # 就是「把没检测的检掉」）。同一个形状、相反的结论，取决于模块职责。
+    #
+    # NULL 兜底不能省：处理库无行时 h.erp_handled 是 NULL，
+    # `NULL <> '已处理'` 结果是 NULL（不成立），会把这行漏成「已处理」。
+    unhandled_expr = ("SUM(CASE WHEN TRIM(COALESCE(h.erp_handled, '')) <> "
                       f"'{_HANDLE_DONE}' THEN 1 ELSE 0 END)")
+    # 「整单至少有一行检测过」这道门槛保留：纯未送检的退回单不该混进处理待办
+    # （它们此刻在检测页的待检清单里）。实测这道门槛挡住 94 单。
     at_least_one_tested = f"{tested_expr} > 0"
 
     base = (
@@ -1619,7 +1825,7 @@ def query_handle_orders(filters: dict = None, page: int = 1, page_size: int = 50
         f"  MIN(r.project_site)    AS project_site, "
         f"  MIN(r.return_date)     AS return_date, "
         f"  MIN(r.registered_at)   AS registered_at, "
-        f"  COUNT(*)               AS lines, "
+        f"  COUNT(*)               AS `lines`, "
         f"  {tested_expr}          AS tested, "
         f"  {handled_expr}         AS handled "
         f"{_DETAIL_FROM}{where} "
@@ -1633,7 +1839,7 @@ def query_handle_orders(filters: dict = None, page: int = 1, page_size: int = 50
     conn = get_conn()
     total = conn.execute(
         f"SELECT COUNT(*) c FROM (SELECT r.order_no {_DETAIL_FROM}{where} "
-        f"GROUP BY r.order_no {having});", params
+        f"GROUP BY r.order_no {having}) g;", params
     ).fetchone()["c"]
 
     page = max(1, int(page or 1))
@@ -1658,6 +1864,125 @@ def query_handle_orders(filters: dict = None, page: int = 1, page_size: int = 50
             d["status"], d["status_key"] = "待处理", "untested"
         else:
             d["status"], d["status_key"] = "部分处理", "testing"
+        out.append(d)
+
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": (total + page_size - 1) // page_size,
+        "rows": out,
+    }
+
+
+# 明细查询「按售后单聚合」清单的排序白名单。
+#
+# 值必须是**聚合表达式**（MIN / COUNT / SUM）：`GROUP BY r.order_no` 之后拿裸列
+# （例如 r.return_date）在 ONLY_FULL_GROUP_BY 下直接报 1055，宽松模式下则给出
+# 组内不确定的一行 —— 两种都不是想要的。未知 key 一律落到默认的登记时间。
+_ORDER_SORTS = {
+    "order_no": "r.order_no",
+    "return_no": "MIN(r.return_no)",
+    "carrier": "MIN(r.carrier)",
+    "turbine_vendor": "MIN(r.turbine_vendor)",
+    "project_site": "MIN(r.project_site)",
+    "return_date": "MIN(r.return_date)",
+    "registered_at": "MIN(r.registered_at)",
+    "lines": "COUNT(*)",
+    "qty": "SUM(COALESCE(r.return_qty, 0))",
+}
+
+
+def query_return_orders(filters: dict = None, page: int = 1, page_size: int = 50,
+                        sort_by: str = "registered_at",
+                        sort_dir: str = "desc") -> dict:
+    """明细查询用：**按售后单号聚合**的清单（一行 = 一个售后单）。
+
+    与 `query_returns`（明细级，一行 = 一只产品）互补：左侧列表看整单、
+    右侧明细看单品。两边的筛选口径完全一致 —— 都走 `_build_where`，
+    所以「左边筛出这张单」与「右边筛出这条明细」必然对得上，
+    不会出现左边有单、点开右边是空的。
+    展示口径：一个售后单内出现**多个整机厂家 / 多个项目风场**时全部列出（用「 / 」连接），
+    并给出 vendor_multi / site_multi 标记，界面据此加「多」小标 —— 取 MIN() 会默默丢掉一半值。
+    """
+    filters = dict(filters or {})
+    where, params = _build_where(filters)
+
+    tested_expr = f"SUM(CASE WHEN {_TESTED_SQL} THEN 1 ELSE 0 END)"
+    # 展示口径：一个售后单内可能有多个厂家 / 风场（实测 7 单多厂家、28 单多风场），
+    # 取 MIN() 会默默丢掉一半，所以全部列出（「 / 」连接），空值先 NULLIF 掉不参与 DISTINCT。
+    vendor_gc = ("GROUP_CONCAT(DISTINCT NULLIF(TRIM(r.turbine_vendor), '') "
+                 "ORDER BY NULLIF(TRIM(r.turbine_vendor), '') SEPARATOR ' / ')")
+    site_gc = ("GROUP_CONCAT(DISTINCT NULLIF(TRIM(r.project_site), '') "
+               "ORDER BY NULLIF(TRIM(r.project_site), '') SEPARATOR ' / ')")
+
+    # ⚠️ 裸列 i.completion：理由见 _PENDING_SQL 上面的长注释 ——
+    # 展示层把空值归一成「未完结」，而这三个字里含「完结」，
+    # 拿归一后的值去 LIKE '%完结%' 会把所有未完结行算成已完结。
+    done_expr = "SUM(CASE WHEN i.completion LIKE '%完结%' THEN 1 ELSE 0 END)"
+    # 已处理必须精确比较（与 query_handle_orders 同口径，注释见那里）
+    handled_expr = ("SUM(CASE WHEN TRIM(COALESCE(h.erp_handled, '')) = "
+                    f"'{_HANDLE_DONE}' THEN 1 ELSE 0 END)")
+
+    base = (
+        f"SELECT r.order_no                AS order_no, "
+        f"  MIN(r.return_no)               AS return_no, "
+        f"  MIN(r.carrier)                 AS carrier, "
+        f"  {vendor_gc}                   AS turbine_vendor, "
+        f"  {site_gc}                     AS project_site, "
+        f"  COUNT(DISTINCT NULLIF(TRIM(r.turbine_vendor), '')) AS vendor_n, "
+        f"  COUNT(DISTINCT NULLIF(TRIM(r.project_site), ''))   AS site_n, "
+        f"  MIN(r.return_date)             AS return_date, "
+        f"  MIN(r.registered_at)           AS registered_at, "
+        f"  MIN(r.registrar)               AS registrar, "
+        f"  COUNT(*)                       AS `lines`, "
+        f"  SUM(COALESCE(r.return_qty, 0)) AS qty, "
+        f"  {tested_expr}                  AS tested, "
+        f"  {done_expr}                    AS done, "
+        f"  {handled_expr}                 AS handled "
+        f"{_DETAIL_FROM}{where} "
+        f"GROUP BY r.order_no "
+    )
+    order_expr = _ORDER_SORTS.get(str(sort_by or ""), _ORDER_SORTS["registered_at"])
+    order = (f"ORDER BY {order_expr} "
+             f"{'ASC' if str(sort_dir).lower() == 'asc' else 'DESC'} ")
+
+    conn = get_conn()
+    total = conn.execute(
+        f"SELECT COUNT(*) c FROM (SELECT r.order_no {_DETAIL_FROM}{where} "
+        f"GROUP BY r.order_no) g;", params
+    ).fetchone()["c"]
+
+    page = max(1, int(page or 1))
+    page_size = min(max(1, int(page_size or 50)), 500)
+    offset = (page - 1) * page_size
+
+    rows = conn.execute(
+        base + order + "LIMIT ? OFFSET ?;", params + [page_size, offset]
+    ).fetchall()
+
+    out = []
+    for r in rows:
+        d = dict(r)
+        lines = int(d["lines"] or 0)
+        tested = int(d["tested"] or 0)
+        done = int(d["done"] or 0)
+        d["lines"] = lines
+        d["qty"] = float(d["qty"] or 0)      # Decimal → float，免得序列化口径不一
+        d["untested"] = max(0, lines - tested)
+        d["unhandled"] = max(0, lines - int(d["handled"] or 0))
+        # 多值标记：vendor_n / site_n 只在 SQL 里用一下，不往外泄
+        d["vendor_multi"] = int(d.pop("vendor_n") or 0) > 1
+        d["site_multi"] = int(d.pop("site_n") or 0) > 1
+        for k in ("turbine_vendor", "project_site", "return_no", "carrier"):
+            if d.get(k) is None:
+                d[k] = ""
+        if lines and done >= lines:
+            d["status"], d["status_key"] = "已完结", "done"
+        elif tested == 0 and done == 0:
+            d["status"], d["status_key"] = "未检测", "untested"
+        else:
+            d["status"], d["status_key"] = "检测中", "testing"
         out.append(d)
 
     return {
@@ -1699,7 +2024,7 @@ def _prune_dict_field(conn, field: str) -> int:
                   SELECT TRIM({field}) AS value, COUNT(*) AS n FROM returns
                   WHERE {field} IS NOT NULL AND TRIM({field}) <> ''
                   GROUP BY {field} ORDER BY n DESC LIMIT {int(DICT_OPTION_LIMIT)}
-                )
+                ) g
               );""",
         (field,),
     )
@@ -1730,9 +2055,9 @@ def refresh_dict_options() -> dict:
                 c.execute(
                     """INSERT INTO dict_option (field, value, use_count, updated_at)
                        VALUES (?,?,?,?)
-                       ON CONFLICT(field, value) DO UPDATE SET
-                         use_count = excluded.use_count,
-                         updated_at = excluded.updated_at;""",
+                       ON DUPLICATE KEY UPDATE
+                         use_count = VALUES(use_count),
+                         updated_at = VALUES(updated_at);""",
                     (field, str(r["v"]).strip(), r["n"], now),
                 )
     # 检测 / 处理登记库的字典候选各存各的 —— 两个都要转发。
@@ -1792,7 +2117,7 @@ def distinct_values(field: str, keyword: str = "", limit: int = 300) -> list:
            f"WHERE {field} IS NOT NULL AND TRIM({field}) <> ''")
     params = []
     if keyword:
-        sql += f" AND {field} LIKE ? ESCAPE '\\'"
+        sql += f" AND {field} LIKE ? ESCAPE '\\\\'"
         params.append(f"%{_escape_like(keyword)}%")
     sql += f" GROUP BY {field} ORDER BY n DESC LIMIT ?;"
     params.append(limit)
@@ -1825,8 +2150,7 @@ def stats_overview(filters: dict = None) -> dict:
         f"""SELECT
               COUNT(*)                                   AS records,
               COALESCE(SUM(r.return_qty), 0)             AS qty,
-              COALESCE(SUM(CASE WHEN r.sync_state = 'pending'
-                        THEN 1 ELSE 0 END), 0)                                    AS pending_sync,
+
               COUNT(DISTINCT r.order_no)                 AS orders,
               COUNT(DISTINCT r.product_model)            AS models,
               COUNT(DISTINCT r.turbine_vendor)           AS vendors
@@ -1856,8 +2180,8 @@ def stats_inspect_overview(filters: dict = None) -> dict:
 
     dated = (f"r.return_date IS NOT NULL AND TRIM(r.return_date) <> '' "
              f"AND i.test_date IS NOT NULL AND TRIM(i.test_date) <> '' "
-             f"AND julianday(i.test_date) >= julianday(r.return_date)")
-    in_time = f"{dated} AND julianday(i.test_date) - julianday(r.return_date) <= {FAST_TEST_DAYS}"
+             f"AND TO_DAYS(i.test_date) >= TO_DAYS(r.return_date)")
+    in_time = f"{dated} AND TO_DAYS(i.test_date) - TO_DAYS(r.return_date) <= {FAST_TEST_DAYS}"
 
     row = conn.execute(
         f"""SELECT
@@ -1877,12 +2201,12 @@ def stats_inspect_overview(filters: dict = None) -> dict:
     out = {k: (0 if v is None else v) for k, v in dict(row).items()}
 
     avg_row = conn.execute(
-        f"""SELECT AVG(julianday(i.test_date) - julianday(r.return_date)) AS d
+        f"""SELECT AVG(TO_DAYS(i.test_date) - TO_DAYS(r.return_date)) AS d
             {_DETAIL_FROM}{where_all}
             {" AND " if where_all else " WHERE "}
               r.return_date IS NOT NULL AND TRIM(r.return_date) <> ''
               AND i.test_date IS NOT NULL AND TRIM(i.test_date) <> ''
-              AND julianday(i.test_date) >= julianday(r.return_date);""",
+              AND TO_DAYS(i.test_date) >= TO_DAYS(r.return_date);""",
         params_all
     ).fetchone()
     out["avg_test_days"] = round(avg_row["d"], 1) if avg_row and avg_row["d"] else 0
@@ -1926,9 +2250,14 @@ def stats_trend(filters: dict = None, granularity: str = "month",
     col = _qualify(date_field)
     where, params = _build_where(filters or {}, scope)
     joiner = " AND " if where else " WHERE "
-    fmt = {"month": "%Y-%m", "week": "%Y-W%W", "day": "%Y-%m-%d",
+    # ⚠️ 换 MySQL 时这里踩过一次：SQLite 的 %W 是「周序号」，MySQL 的 %W 是
+    # **星期几的名称**（Monday…）。周粒度必须用 MySQL 的 %u（周一为一周之始，
+    # 00-53），与 SQLite %W 同义。写 %W 不会报错，只会把标签全变成星期名。
+    fmt = {"month": "%Y-%m", "week": "%Y-W%u", "day": "%Y-%m-%d",
            "year": "%Y"}.get(granularity, "%Y-%m")
-    sql = (f"SELECT strftime('{fmt}', {col}) AS label, "
+    # STR_TO_DATE 先兜底：非法日期在严格模式下会告警，STR_TO_DATE 直接给 NULL，
+    # 与 SQLite strftime 对垃圾输入返回 NULL 的行为一致。
+    sql = (f"SELECT DATE_FORMAT(STR_TO_DATE({col}, '%Y-%m-%d'), '{fmt}') AS label, "
            f"COUNT(*) AS value, COALESCE(SUM(r.return_qty),0) AS qty "
            f"{_DETAIL_FROM}{where}{joiner}{col} IS NOT NULL "
            f"AND TRIM({col}) <> '' "

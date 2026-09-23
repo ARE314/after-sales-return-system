@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>工作台 · 售后返件登记系统</title>
   <link rel="icon" href="/favicon.ico" sizes="any">
-  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260920p">
-  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260920p">
-<link rel="stylesheet" href="/static/assets/app.css?v=20260920p">
+  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260923b">
+  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260923b">
+<link rel="stylesheet" href="/static/assets/app.css?v=20260923b">
 </head>
 <body>
-<script src="/static/assets/common.js?v=20260920p"></script>
+<script src="/static/assets/common.js?v=20260923b"></script>
 <script>
 (async () => {
   const content = await mountLayout('index', '工作台', '售后返件登记系统 · 总览与快捷入口', [
@@ -39,7 +39,6 @@
       { label: '未完结', value: num(ov.unfinished), unit: '条', cls: 'kpi--danger' },
       { label: '本月新增', value: num(ov.this_month), unit: '条', cls: 'kpi--success' },
       { label: '平均检测时长', value: num(ov.avg_test_days, 1), unit: '天', cls: 'kpi--info' },
-      { label: '待同步', value: num(ov.pending_sync), unit: '条', cls: 'kpi--warning' },
     ];
 
     const kpiGrid = h('div', { class: 'kpis mb16' },
@@ -100,7 +99,10 @@
         quickLink('/query.html', '明细查询', '多条件筛选、关键词检索、导出 Excel'),
         quickLink('/dashboard.html', '数据看板', 'KPI 与多维图表联动分析'),
         quickLink('/items.html', '匹配数据库', '物料主档维护，扫码回填的依据'),
-        quickLink('/sync.html', '同步设置', '待同步队列与云端推送状态'),
+        quickLink('/delivery-apply.html', '发货申请', '按标准表单提交发货需求，一单可发多种产品'),
+        quickLink('/delivery-pending.html', '待发货清单', '已提交未发货的执行队列，标记已发货即出队'),
+        quickLink('/delivery-track.html', '发货跟踪', '发货记录的落地台账；手工登记与批量导入都写到这里'),
+        quickLink('/delivery-ledger.html', '核销台账', '发货 × 返件核销，看每个风场每个型号还剩多少没返回'),
       ])),
     ]);
 

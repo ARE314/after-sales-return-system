@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>权限设置 · 售后返件登记系统</title>
   <link rel="icon" href="/favicon.ico" sizes="any">
-  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260920p">
-  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260920p">
-<link rel="stylesheet" href="/static/assets/app.css?v=20260920p">
+  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260923b">
+  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260923b">
+<link rel="stylesheet" href="/static/assets/app.css?v=20260923b">
 </head>
 <body>
-<script src="/static/assets/common.js?v=20260920p"></script>
+<script src="/static/assets/common.js?v=20260923b"></script>
 <script>
 /* 权限设置（2026-09-20 新增）
  *
@@ -293,6 +293,7 @@
           h('div', { class: 'dslist' }, cards),
         ]),
       ]),
+      permMatrixView(),
       h('div', { class: 'card' }, [
         h('div', { class: 'card__head' },
           h('div', { class: 'card__title' }, '内置权限组的设计取舍')),
@@ -305,6 +306,73 @@
             h('div', { class: 'mt8' },
               '需要更细的岗位划分时，新建自定义组即可；内置组也可以改权限'
               + '（管理员组除外）。'),
+          ])),
+      ]),
+    ]);
+  }
+
+  /* 权限一表全览：行 = 权限点，列 = 权限组。
+   *
+   * 组的编辑弹窗一次只看得到一个组，想比较两个组的差别（「只读组到底能不能
+   * 导出」）得来回开弹窗、还得记；这张表把全部权限点 × 全部权限组摊在一屏里。
+   * 它只读、不参与授权，改权限仍然走弹窗（那里有服务端校验）。 */
+  function permMatrixView() {
+    const groups = DATA.groups.rows || [];
+    const secs = (DATA.perms && DATA.perms.permission_groups) || [];
+    const total = (DATA.perms && DATA.perms.all_perms || []).length;
+    if (!groups.length || !secs.length) return null;
+
+    const head = h('tr', {}, [
+      h('th', { class: 'pmx__pt' }, `权限点（${total} 项）`),
+      ...groups.map(g => h('th', {
+        class: 'pmx__grp' + (g.locked ? ' is-locked' : ''),
+      }, [
+        h('div', { class: 'pmx__gname' }, g.name),
+        h('div', { class: 'pmx__gmeta' }, `${g.count} 项 · ${g.user_count} 人`),
+      ])),
+    ]);
+
+    const body = [];
+    for (const sec of secs) {
+      body.push(h('tr', { class: 'pmx__sec' },
+        h('th', { colspan: String(groups.length + 1) },
+          `${sec.title} · ${sec.perms.length} 项`)));
+      for (const p of sec.perms) {
+        body.push(h('tr', {}, [
+          h('td', { class: 'pmx__pt' }, [
+            h('span', { class: 'pmx__plabel' }, p.label),
+            h('span', { class: 'pmx__pkey' }, p.key),
+          ]),
+          ...groups.map(g => {
+            const on = (g.perms || []).includes(p.key);
+            return h('td', {
+              class: 'pmx__c' + (on ? ' is-on' : ''),
+              title: `${g.name} · ${on ? '有' : '没有'}「${p.label}」`,
+            }, on ? '✓' : '·');
+          }),
+        ]));
+      }
+    }
+    // 合计行：和组卡片上的「N 项权限」对得上，对不上就是权限点下线了
+    body.push(h('tr', { class: 'pmx__foot' }, [
+      h('td', { class: 'pmx__pt' }, '合计'),
+      ...groups.map(g => h('td', { class: 'pmx__c' }, String(g.count))),
+    ]));
+
+    return h('div', { class: 'card mb12' }, [
+      h('div', { class: 'card__head' }, [
+        h('div', { class: 'card__title' }, '权限一表全览'),
+        h('div', { class: 'card__tools' },
+          h('span', { class: 'small muted' }, '✓ 有权限 · · 无权限')),
+      ]),
+      h('div', { class: 'card__body' }, [
+        h('div', { class: 'hint-info mb12' },
+          '按组编辑权限时一次只能看到一个组，比较两个组的差别要来回开弹窗；'
+          + '这张表把全部权限点与全部权限组摊在一起，横向一栏就是一个组。'),
+        h('div', { class: 'table-wrap pmx__wrap' },
+          h('table', { class: 'table table--compact pmx' }, [
+            h('thead', {}, head),
+            h('tbody', {}, body),
           ])),
       ]),
     ]);
@@ -467,7 +535,7 @@
         bk.path ? h('div', { class: 'small muted mono cell-wrap',
                              style: { marginTop: '8px' } }, bk.path) : null,
         h('div', { class: 'small muted', style: { marginTop: '8px' } },
-          '备份由 tools/backup.py 产出（五库一致性快照 + 照片）。'
+          '备份由 tools/backup.py 产出（六库一致性快照 + 照片）。'
           + '定时执行见 deploy/ars-backup.timer（systemd）或 docker-compose.yml 的 backup 服务。'),
       ]),
     ]);
@@ -525,7 +593,7 @@
             + 'ARS_PUBLIC_BASE_URL=https://returns.example.com\n'
             + 'ARS_COOKIE_SECURE=1         # 走 HTTPS 时必须开\n'
             + 'ARS_HTTPS_ONLY=1            # 拒绝明文 HTTP 登录\n'
-            + 'ARS_OPEN_API_HOST=0.0.0.0   # 数据接口对外（金山定时任务要访问）\n'
+            + 'ARS_OPEN_API_HOST=0.0.0.0   # 数据接口对外（外部系统要访问）\n'
             + 'ARS_OPEN_API_PORT=8100\n'
             + 'ARS_CORS_ORIGINS=            # 同源部署留空'),
         ]),

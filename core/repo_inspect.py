@@ -73,11 +73,15 @@ def count() -> int:
         "SELECT COUNT(*) c FROM inspect_db.inspect_records;").fetchone()["c"]
 
 
-def upsert(detail_key: str, data: dict, operator: str = "") -> int:
+def upsert(detail_key: str, data: dict, operator: str = "",
+           refresh_dict: bool = True) -> int:
     """写入或更新一条检测记录（不存在则新建，保持稀疏）。
 
     完结状况由本函数统一重算：先与库中现有值合并，再按规则判定 ——
     这样「只提交部分字段」的调用（如 PUT 只改检测结果）也能得到正确结论。
+
+    `refresh_dict=False` 供**批量导入**用（理由同 repo_handle.upsert：
+    逐行重建字典是 O(n²)）。
     """
     payload = {k: v for k, v in (data or {}).items()
                if k in INSPECT_COLUMNS and k != "detail_key"}
@@ -85,6 +89,8 @@ def upsert(detail_key: str, data: dict, operator: str = "") -> int:
     payload.pop("completion", None)
     if not payload:
         return 0
+    # 值是否全为空串 —— 决定「从未检测过的明细」要不要建行，见下面。
+    all_blank = not any(str(v or "").strip() for v in payload.values())
 
     now = _now()
     with tx() as conn:
@@ -92,18 +98,27 @@ def upsert(detail_key: str, data: dict, operator: str = "") -> int:
             "SELECT * FROM inspect_db.inspect_records WHERE detail_key = ?;",
             (detail_key,),
         ).fetchone()
+        # ⚠️ 「从未检测过的明细 + 全空 payload」→ 不建行。
+        #    判断依据必须看**值**而不是键的个数：`payload` 只要有键就非空，
+        #    所以一个「十个字段都传空串」的调用会在这里凭空造出一行全空检测记录。
+        #    它不带任何信息，却会被「检测库行数」这类口径算进去
+        #    （2026-09-22 实测：明细查询页的「读原值→写回」让「已检测」KPI 虚高 +1，
+        #     被自检那句「接口口径 = 检测时间非空」当场抓到）。
+        #    库里**已有行**时照常清空 —— 那是用户明确要「清空」的语义。
+        if cur is None and all_blank:
+            return 0
         merged = dict(cur) if cur else {}
         merged.update(payload)
         payload["completion"] = compute_completion(merged)
 
         cols = ["detail_key"] + list(payload.keys()) + ["created_at", "updated_at"]
         marks = ", ".join("?" for _ in cols)
-        updates = ", ".join(f"{k} = excluded.{k}" for k in payload)
+        updates = ", ".join(f"`{k}` = VALUES(`{k}`)" for k in payload)
         conn.execute(
             f"""INSERT INTO inspect_db.inspect_records ({', '.join(cols)})
                 VALUES ({marks})
-                ON CONFLICT(detail_key) DO UPDATE SET
-                    {updates}, updated_at = excluded.updated_at;""",
+                ON DUPLICATE KEY UPDATE
+                    {updates}, updated_at = VALUES(updated_at);""",
             [detail_key] + list(payload.values()) + [now, now],
         )
         conn.execute(
@@ -113,7 +128,8 @@ def upsert(detail_key: str, data: dict, operator: str = "") -> int:
              json.dumps(payload, ensure_ascii=False), operator, now),
         )
 
-    refresh_dict_options()
+    if refresh_dict:
+        refresh_dict_options()
     return 1
 
 
@@ -167,7 +183,7 @@ def _prune_field(conn, field: str) -> int:
                   FROM inspect_db.inspect_records
                   WHERE {field} IS NOT NULL AND TRIM({field}) <> ''
                   GROUP BY {field} ORDER BY n DESC LIMIT {int(DICT_OPTION_LIMIT)}
-                )
+                ) g
               );""",
         (field,),
     )
@@ -193,9 +209,9 @@ def refresh_dict_options() -> int:
                 conn.execute(
                     """INSERT INTO inspect_db.dict_option (field, value, use_count, updated_at)
                        VALUES (?,?,?,?)
-                       ON CONFLICT(field, value) DO UPDATE SET
-                         use_count = excluded.use_count,
-                         updated_at = excluded.updated_at;""",
+                       ON DUPLICATE KEY UPDATE
+                         use_count = VALUES(use_count),
+                         updated_at = VALUES(updated_at);""",
                     (field, str(r["v"]).strip(), r["n"], now),
                 )
 
@@ -250,7 +266,7 @@ def distinct_values(field: str, keyword: str = "", limit: int = 300) -> list:
            f"WHERE {field} IS NOT NULL AND TRIM({field}) <> ''")
     params = []
     if keyword:
-        sql += f" AND {field} LIKE ? ESCAPE '\\'"
+        sql += f" AND {field} LIKE ? ESCAPE '\\\\'"
         params.append(f"%{_escape_like(keyword)}%")
     sql += f" GROUP BY {field} ORDER BY n DESC LIMIT ?;"
     params.append(limit)

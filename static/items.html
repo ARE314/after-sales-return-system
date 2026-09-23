@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>匹配数据库 · 售后返件登记系统</title>
   <link rel="icon" href="/favicon.ico" sizes="any">
-  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260920p">
-  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260920p">
-<link rel="stylesheet" href="/static/assets/app.css?v=20260920p">
+  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260923b">
+  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260923b">
+<link rel="stylesheet" href="/static/assets/app.css?v=20260923b">
 </head>
 <body>
-<script src="/static/assets/common.js?v=20260920p"></script>
+<script src="/static/assets/common.js?v=20260923b"></script>
 <script>
 (async () => {
   const content = await mountLayout('items', '匹配数据库',
@@ -30,7 +30,6 @@
 
   /* ---------------- 统计卡 ---------------- */
   const statHost = h('div', { id: 'stat-host' });
-
   /* ---------------- 搜索与筛选 ---------------- */
   const kwInput = h('input', {
     class: 'input', style: { width: '320px' },
@@ -84,28 +83,26 @@
   const pagerHost = h('div', { class: 'pager' });
   const summary = h('div', { class: 'card__hint' });
 
-  content.replaceChildren(
-    statHost,
-    h('div', { class: 'card mb12 mt12' }, h('div', { class: 'card__body' }, [
-      h('div', { class: 'flex flex-wrap', style: { gap: '8px' } }, [
-        kwInput,
-        h('span', { class: 'small muted', style: { alignSelf: 'center' } },
-          '料号是唯一键，重复导入会按料号覆盖'),
-      ]),
-      h('div', { class: 'mt8' }, facetRow),
-    ])),
-    h('div', { class: 'card' }, [
-      h('div', { class: 'card__head' }, [
-        h('div', { class: 'card__title' }, '物料主档'),
-        summary,
-        h('div', { class: 'card__tools' },
-          h('button', { class: 'btn btn--sm btn--ghost', onclick: () => load(state.page) }, '刷新')),
-      ]),
-      tableHost,
-      pagerHost,
+  const searchCard = h('div', { class: 'card mb12 mt12' }, h('div', { class: 'card__body' }, [
+    h('div', { class: 'flex flex-wrap', style: { gap: '8px' } }, [
+      kwInput,
+      h('span', { class: 'small muted', style: { alignSelf: 'center' } },
+        '料号是唯一键，重复导入会按料号覆盖'),
     ]),
-  );
+    h('div', { class: 'mt8' }, facetRow),
+  ]));
+  const tableCard = h('div', { class: 'card' }, [
+    h('div', { class: 'card__head' }, [
+      h('div', { class: 'card__title' }, '物料主档'),
+      summary,
+      h('div', { class: 'card__tools' },
+        h('button', { class: 'btn btn--sm btn--ghost', onclick: () => load(state.page) }, '刷新')),
+    ]),
+    tableHost,
+    pagerHost,
+  ]);
 
+  content.replaceChildren(statHost, searchCard, tableCard);
   /* ---------------- 数据加载 ---------------- */
   async function loadMeta(force) {
     try {

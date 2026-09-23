@@ -1,15 +1,15 @@
 """数据开放接口 —— 设置项、数据取数与拉取日志
 
-方向说明（2026-09-20 改造）
---------------------------
+方向说明（2026-09-20 改造，2026-09-21 去掉金山专属部分）
+-------------------------------------------------------
 原来的设计是**本系统主动推送**到金山「服务器数据」表：本系统要持有金山侧
 凭据、要维护推送队列、要处理冲突。现改为**反方向拉取**：
 
-    金山文档定时任务  ──HTTP──▶  本系统开放接口（独立端口）──▶  返回 JSON/CSV
+    外部系统的定时任务  ──HTTP──▶  本系统开放接口（独立端口）──▶  JSON/CSV
 
-这样本系统不需要任何金山凭据，也不需要出网；拉取节奏完全由金山侧控制。
-代价是要把接口暴露出去，所以这里把「令牌 + 来源 IP 白名单 + 数据集范围」
-三件事都做成可配置项，且默认只监听 127.0.0.1（见 config.OPEN_API_HOST）。
+这样本系统不需要持有任何外部系统的凭据，也不需要出网；拉取节奏完全由对方
+控制。代价是要把接口暴露出去，所以这里把「令牌 + 来源 IP 白名单 + 数据集
+范围」三件事都做成可配置项，且默认只监听 127.0.0.1（见 config.OPEN_API_HOST）。
 
 本模块只管**设置与数据**，HTTP 层在 open_api.py。
 """
@@ -17,10 +17,10 @@ import ipaddress
 import json
 import re
 import secrets
-import sqlite3
 from datetime import datetime
 
-from config import OPEN_API_IPS, OPEN_API_SCOPES, OPEN_API_TOKEN
+from config import MAIN_SCHEMA, OPEN_API_IPS, OPEN_API_SCOPES, OPEN_API_TOKEN
+from core import dbapi
 from core.db import get_conn, tx
 
 # ---------------------------------------------------------------------------
@@ -122,7 +122,7 @@ def _now() -> str:
 def get_token() -> str:
     """读取访问令牌。首次调用时生成并落库（config 里配了就用配置的）。"""
     row = get_conn().execute(
-        "SELECT value FROM auth_db.setting WHERE key = 'open_api_token';"
+        "SELECT value FROM auth_db.setting WHERE `key` = 'open_api_token';"
     ).fetchone()
     if row and row["value"]:
         return row["value"]
@@ -207,69 +207,9 @@ def set_scopes(items) -> list:
     return picked
 
 
-# ---------------------------------------------------------------------------
-# 金山侧目标信息（文件 ID / 云盘 ID / 落点工作表）
-#
-# 这三项**不驱动本系统的任何行为** —— 它是给配置者在金山侧建定时任务时
-# 抄用的备忘，所以放在页面上可填写、可持久化，而不再写死在 config 里。
-# 换文件或换工作表时在界面改一下即可，不用改代码重启。
-# ---------------------------------------------------------------------------
-
-KDOCS_FIELDS = ("file_id", "drive_id", "sheet")
-
-
-def kdocs_target() -> dict:
-    """取金山侧目标信息（可填写项，存 auth_db.setting）。
-
-    从没配置过时回落到 `config.KDOCS_TARGET` —— 老部署升级后页面不会突然空白。
-    一旦保存过，就**以保存的值为准**（某项存成空串即真的为空，不再回落默认），
-    否则用户会发现「我明明清空了，怎么又冒出来了」。想回到默认值用
-    `reset_kdocs_target()`（页面上的「恢复默认」按钮）。
-    """
-    from config import KDOCS_TARGET                               # noqa: PLC0415
-    base = {f: "" for f in KDOCS_FIELDS}
-    for k, v in (KDOCS_TARGET or {}).items():
-        if k in KDOCS_FIELDS:
-            base[k] = str(v or "")
-
-    raw = _get("kdocs_target")
-    if raw is None:
-        return base
-    try:
-        saved = json.loads(raw)
-    except Exception:  # noqa: BLE001
-        # 存坏了（手工改库 / 旧格式）就退回默认值，别让页面报错
-        return base
-    if not isinstance(saved, dict):
-        return base
-    for f_ in KDOCS_FIELDS:
-        if f_ in saved:
-            base[f_] = str(saved[f_] or "")
-    return base
-
-
-def set_kdocs_target(data) -> dict:
-    """保存金山侧目标信息。只认 KDOCS_FIELDS 三个键，其余一律丢弃。
-
-    截断到 200 字符：这三项都是短标识，出现超长值基本都是粘贴时带进了
-    别的东西（比如整段 URL），拦在这里比事后排查容易。
-    """
-    src = data if isinstance(data, dict) else {}
-    picked = {f_: str(src.get(f_) or "").strip()[:200] for f_ in KDOCS_FIELDS}
-    _set("kdocs_target", json.dumps(picked, ensure_ascii=False))
-    return kdocs_target()
-
-
-def reset_kdocs_target() -> dict:
-    """清掉已保存的值，回落到 config.KDOCS_TARGET。"""
-    with tx() as conn:
-        conn.execute("DELETE FROM auth_db.setting WHERE key = 'kdocs_target';")
-    return kdocs_target()
-
-
 def _get(key: str):
     row = get_conn().execute(
-        "SELECT value FROM auth_db.setting WHERE key = ?;",
+        "SELECT value FROM auth_db.setting WHERE `key` = ?;",
         (key,)).fetchone()
     return row["value"] if row else None
 
@@ -277,9 +217,9 @@ def _get(key: str):
 def _set(key: str, value: str) -> None:
     with tx() as conn:
         conn.execute(
-            "INSERT INTO auth_db.setting(key, value, updated_at) "
-            "VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET "
-            "value = excluded.value, updated_at = excluded.updated_at;",
+            "INSERT INTO auth_db.setting(`key`, value, updated_at) "
+            "VALUES (?,?,?) ON DUPLICATE KEY UPDATE "
+            "value = VALUES(value), updated_at = VALUES(updated_at);",
             (key, value, _now()))
 
 
@@ -290,8 +230,8 @@ def _set(key: str, value: str) -> None:
 def columns_of(dataset: str) -> list:
     """取数据集字段名。
 
-    跨库表要用 `PRAGMA 库名.table_info(表名)` —— 直接写 `PRAGMA table_info`
-    只会查主库，跨库表会返回空列表（不报错，字段清单静默变空）。
+    跨库表同样走 information_schema —— 这里必须带上 `table_schema` 才能
+    定位到目标库，否则（只按表名查）会捞出别的库里同名表的列。
     """
     ds = DATASETS.get(dataset)
     if not ds:
@@ -309,9 +249,12 @@ def columns_of(dataset: str) -> list:
     table = ds["table"]
     if "." in table:
         db, tbl = table.split(".", 1)
-        rows = get_conn().execute(f"PRAGMA {db}.table_info({tbl});").fetchall()
     else:
-        rows = get_conn().execute(f"PRAGMA table_info({table});").fetchall()
+        db, tbl = MAIN_SCHEMA, table
+    rows = get_conn().execute(
+        "SELECT column_name AS name FROM information_schema.columns "
+        "WHERE table_schema = ? AND table_name = ? "
+        "ORDER BY ordinal_position;", (db, tbl)).fetchall()
     return [r["name"] for r in rows]
 
 
@@ -398,7 +341,7 @@ def dataset_list() -> list:
             n = get_conn().execute(
                 f"SELECT COUNT(*) c FROM {DATASETS[key]['table']};"
             ).fetchone()["c"]
-        except sqlite3.Error:
+        except dbapi.Error:
             n = 0
         out.append({
             "key": key, "label": DATASETS[key]["label"],
@@ -418,7 +361,7 @@ def log_pull(ip: str, dataset: str, endpoint: str, rows: int, ok: bool = True,
     with tx() as conn:
         conn.execute(
             "INSERT INTO auth_db.open_api_log(created_at, ip, dataset, "
-            "endpoint, rows, ok, message) VALUES (?,?,?,?,?,?,?);",
+            "endpoint, `rows`, ok, message) VALUES (?,?,?,?,?,?,?);",
             (_now(), ip or "", dataset or "", endpoint or "", rows or 0,
              1 if ok else 0, message or ""))
 
@@ -440,7 +383,7 @@ def last_pull():
 def new_since_last_pull() -> int:
     """自上次成功拉取以来新增的退回明细条数（页面上的「待拉取」提示）。
 
-    用 returns.created_at 而不是 sync_state —— 拉取失败时系统并不知道，
+    用 returns.created_at 与上次成功拉取的时间比对 —— 拉取失败时系统并不知道，
     用时间戳比用本地标记更接近真实情况。
     """
     last = last_pull()
@@ -470,8 +413,6 @@ def status() -> dict:
         "new_since_last_pull": new_since_last_pull(),
         "pull_total": get_conn().execute(
             "SELECT COUNT(*) c FROM auth_db.open_api_log;").fetchone()["c"],
-        # 金山侧配置定时任务时需要的信息（可填写项，见 kdocs_target）
-        "kdocs": kdocs_target(),
         "examples": {
             "ping": "GET /api/open/ping",
             "returns": "GET /api/open/data/returns?since=&limit=2000",
@@ -485,6 +426,5 @@ __all__ = [
     "DATASETS", "DATASET_KEYS", "get_token", "rotate_token", "token_masked",
     "allowed_ips", "set_allowed_ips", "client_allowed",
     "scopes", "set_scopes", "columns_of", "fetch", "dataset_list",
-    "KDOCS_FIELDS", "kdocs_target", "set_kdocs_target", "reset_kdocs_target",
     "log_pull", "recent_pulls", "last_pull", "new_since_last_pull", "status",
 ]

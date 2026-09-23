@@ -20,6 +20,9 @@ Description=After-sales Return Registration System
 Documentation=file:/opt/ars/README.md
 After=network-online.target
 Wants=network-online.target
+# 库在同机时装了 mysql 服务的话，排在它后面（**只是排序，不是强依赖**：
+# 库没起来应用会自己重试失败并退出，Restart=always 会把它拉起来）。
+After=mysql.service
 
 [Service]
 Type=simple
@@ -29,6 +32,13 @@ WorkingDirectory=/opt/ars
 
 # ---------- 部署相关配置（都走环境变量，配置文件保持原样便于随代码更新）----------
 Environment=PYTHONUNBUFFERED=1
+# ---------- 数据库（MySQL 8，六个 schema 一个连接）----------
+# **口令放这里不如放 EnvironmentFile**：unit 文件会被 `systemctl cat` 原样打印。
+# .env 就是 compose 用的那个（KEY=VALUE 格式，systemd 直接认），前缀 `-` = 文件不存在也不报错。
+EnvironmentFile=-/opt/ars/.env
+Environment=ARS_MYSQL_HOST=127.0.0.1
+Environment=ARS_MYSQL_PORT=3306
+Environment=ARS_MYSQL_USER=ars
 # 主界面：走反向代理时绑 127.0.0.1 即可；直连公网才需要 0.0.0.0
 Environment=ARS_HOST=127.0.0.1
 Environment=ARS_PORT=8000

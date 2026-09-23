@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>待发货清单 · 售后返件登记系统</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260923b">
+  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260923b">
+<link rel="stylesheet" href="/static/assets/app.css?v=20260923b">
+<style>
+  /* ================= 页面专属样式 =================
+     只服务待发货清单页，所以放页面内而不进 app.css ——
+     进公共样式表就得连带递增全部页面的版本号。
+
+     ★ 2026-09-21 改版：本页从「能出队的执行队列」变成**只读的清点清单**，
+       勾选框 / 批量条 / 出队弹窗那一整套样式随之删掉（它们已没有对应动作）。 */
+
+  /* ---- 顶部汇总条 ---- */
+  .dlvp-sum { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+  .dlvp-sum__item { display: flex; align-items: baseline; gap: 5px; }
+  .dlvp-sum__n { font-size: 19px; font-weight: 650; color: var(--text-primary); line-height: 1; }
+  .dlvp-sum__n.warn { color: var(--danger); }
+  .dlvp-sum__k { font-size: 12px; color: var(--text-tertiary); }
+  .dlvp-sum__sep { width: 1px; height: 22px; background: var(--border); }
+
+  /* ---- 只看超期 勾选 ---- */
+  .dlvp-chk { display: inline-flex; align-items: center; gap: 6px;
+    font-size: 13px; color: var(--text-secondary); cursor: pointer;
+    user-select: none; white-space: nowrap; }
+  .dlvp-chk input { width: 14px; height: 14px; cursor: pointer; }
+
+  /* ---- 表格 ---- */
+  table.dlvp-t { min-width: 1180px; }
+  table.dlvp-t th { white-space: nowrap; }
+  table.dlvp-t td { vertical-align: middle; }
+  table.dlvp-t td.acts { white-space: nowrap; }
+
+  /* ---- 超期 / 今天的日期标记 ---- */
+  .dlvp-date { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .dlvp-overdue {
+    font-size: 10.5px; font-weight: 600; color: var(--danger);
+    background: var(--danger-light); border: 1px solid #f3c2c2;
+    border-radius: 3px; padding: 0 4px; line-height: 16px;
+  }
+  .dlvp-today {
+    font-size: 10.5px; font-weight: 600; color: var(--warning);
+    background: #fff8e6; border: 1px solid #f0dcae;
+    border-radius: 3px; padding: 0 4px; line-height: 16px;
+  }
+
+  /* ---- 发货进度（已登记行数 / 总行数）---- */
+  .dlvp-prog { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .dlvp-partial {
+    font-size: 10.5px; font-weight: 600; color: var(--warning);
+    background: #fff8e6; border: 1px solid #f0dcae;
+    border-radius: 3px; padding: 0 4px; line-height: 16px;
+  }
+  .dlvp-notstart {
+    font-size: 10.5px; font-weight: 600; color: var(--danger);
+    background: var(--danger-light); border: 1px solid #f3c2c2;
+    border-radius: 3px; padding: 0 4px; line-height: 16px;
+  }
+
+  /* ---- 小节标题（发货申请页那份是页内样式，这里得自带一份）---- */
+  .dlvp-sec__title {
+    font-size: 12.5px; font-weight: 600; color: var(--text-secondary);
+    margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+  }
+
+  /* ---- 详情弹窗（与发货申请页同款，重名不冲突）---- */
+  .dlvp-detail { font-size: 13px; }
+  .dlvp-detail dl { display: grid; grid-template-columns: 92px 1fr; gap: 6px 12px;
+    margin: 0 0 16px; }
+  .dlvp-detail dt { color: var(--text-tertiary); font-size: 12px; }
+  .dlvp-detail dd { margin: 0; word-break: break-all; }
+  .dlvp-detail table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .dlvp-detail th { background: var(--bg-subtle); color: var(--text-secondary);
+    font-weight: 600; font-size: 11.5px; padding: 6px 8px; text-align: left;
+    white-space: nowrap; border-bottom: 1px solid var(--border); }
+  .dlvp-detail td { padding: 5px 8px; border-bottom: 1px solid var(--border); }
+  .dlvp-detail tr:last-child td { border-bottom: none; }
+  .dlvp-detail .mono { font-family: var(--font-mono); font-size: 11.5px; }
+</style>
+</head>
+<body>
+<script src="/static/assets/common.js?v=20260923b"></script>
+<script>
+(async () => {
+  const countTag = h('span', { class: 'tag' }, '— 单');
+  /* ★ 2026-09-21 改版：本页**只读、不写任何数据**。
+     它从「能出队的执行队列」变成**发货员的清点清单**：
+     发货员照着它一张一张去 ERP 做发货单，做完回到「发货跟踪」按行登记发货单号。
+     改动原因：发货跟踪应该在**申请单一提交**就有这张单，
+     而不是等谁在这儿点一次「标记已发货」才出现。 */
+  const content = await mountLayout('delivery-pending', '待发货清单',
+    '发货员的**清点清单** —— 由「发货申请」派生（不单独建表），按期望发货日排序。'
+    + '本页**只读**：在 ERP 做完发货单后，到「发货跟踪」按行登记发货单号',
+    [countTag]);
+
+  /* ================= 元数据 ================= */
+  let META = { status: [], field_labels: {}, ship_sources: [] };
+  try {
+    META = await api('/delivery/meta');
+  } catch (e) {
+    content.replaceChildren(h('div', { class: 'empty' }, '加载失败：' + e.message));
+    return;
+  }
+  // 风机厂家 / 项目名称的候选来自历史退回记录（与发货申请页同一套来源）
+  let DICT = {};
+  try {
+    DICT = await loadDictMap(['turbine_vendor', 'project_site']);
+  } catch { DICT = {}; }
+
+  // 「去登记发货」要的是**改发货记录**的权限（登记动作在发货跟踪页做）。
+  // 本页自己不需要写权限 —— 它一个字节都不写。
+  const canShip = () => hasPerm('act.delivery_ship');
+
+  /* ================= 列表状态 ================= */
+  let listRows = [];
+  let total = 0;
+  let page = 1;
+  let keyword = '';
+  let fVendor = '';
+  let fSite = '';
+  let dateFrom = '';
+  let dateTo = '';
+  let onlyOverdue = false;
+  let summary = { orders: 0, overdue: 0, qty: 0, partial: 0 };
+  let today = '';
+  const PAGE_SIZE = 20;
+
+  function buildQuery(params) {
+    const sp = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v === null || v === undefined || v === '' || v === false) return;
+      sp.append(k, v === true ? '1' : v);
+    });
+    return sp.toString();
+  }
+
+  /* ================= 顶部汇总 ================= */
+  const sumBox = h('div', { class: 'dlvp-sum' });
+  function renderSummary() {
+    const mk = (n, k, warn) => h('div', { class: 'dlvp-sum__item' }, [
+      h('span', { class: 'dlvp-sum__n' + (warn && n ? ' warn' : '') }, String(n)),
+      h('span', { class: 'dlvp-sum__k' }, k),
+    ]);
+    sumBox.replaceChildren(
+      mk(summary.orders, '单待发'),
+      h('div', { class: 'dlvp-sum__sep' }),
+      mk(summary.overdue, '单超期', true),
+      h('div', { class: 'dlvp-sum__sep' }),
+      mk(summary.qty, '件待发'),
+      h('div', { class: 'dlvp-sum__sep' }),
+      // 「部分已发」是改版后新增的口径：已经开了个头、还没做完的单 ——
+      // 那是发货员最需要回头盯的一批（一张单分成几次做很常见）。
+      mk(summary.partial, '单已部分发货'),
+    );
+  }
+  renderSummary();
+
+  /* ================= 筛选区 ================= */
+  const kwInput = h('input', {
+    class: 'input', type: 'text', style: { width: '210px' },
+    placeholder: '单号 / 收件人 / 地址 / 原因…',
+  });
+  let kwTimer = null;
+  kwInput.addEventListener('input', () => {
+    clearTimeout(kwTimer);
+    kwTimer = setTimeout(() => {
+      keyword = kwInput.value.trim();
+      page = 1;
+      loadList();
+    }, 320);
+  });
+
+  // 筛选用 fixedSelect 而不是 combobox：筛选是「从已有值里精确挑一个」，
+  // 不需要发货申请页那种「异步拉候选 + 允许新值」。候选来自历史退回记录。
+  function dictSelect(name, placeholder, onChange) {
+    return fixedSelect({
+      name, value: '', placeholder: null,
+      options: [{ value: '', label: placeholder }]
+        .concat((DICT[name] || []).map(o => ({ value: o.value, label: o.value }))),
+      onChange,
+    });
+  }
+  const vendorBox = dictSelect('turbine_vendor_filter', '全部厂家', v => {
+    fVendor = v; page = 1; loadList();
+  });
+  const siteBox = dictSelect('project_site_filter', '全部项目', v => {
+    fSite = v; page = 1; loadList();
+  });
+
+  const fromInput = h('input', { class: 'input', type: 'date', style: { width: '140px' } });
+  const toInput = h('input', { class: 'input', type: 'date', style: { width: '140px' } });
+  [fromInput, toInput].forEach((el, i) => {
+    el.addEventListener('change', () => {
+      if (i === 0) dateFrom = el.value; else dateTo = el.value;
+      page = 1; loadList();
+    });
+  });
+
+  const overdueChk = h('input', { type: 'checkbox' });
+  overdueChk.addEventListener('change', () => {
+    onlyOverdue = overdueChk.checked;
+    page = 1; loadList();
+  });
+  const overdueLabel = h('label', { class: 'dlvp-chk' },
+    [overdueChk, h('span', {}, '只看超期')]);
+
+  const clearFilterBtn = h('button', {
+    class: 'btn btn--sm',
+    onclick: () => {
+      kwInput.value = '';
+      keyword = '';
+      vendorBox.value = '';
+      fVendor = '';
+      siteBox.value = '';
+      fSite = '';
+      fromInput.value = '';
+      toInput.value = '';
+      dateFrom = '';
+      dateTo = '';
+      overdueChk.checked = false;
+      onlyOverdue = false;
+      page = 1;
+      loadList();
+    },
+  }, '清空筛选');
+
+  const listHost = h('div', { class: 'table-wrap' });
+  const pagerBox = h('div', { class: 'pager' });
+
+  const filterCard = h('div', { class: 'card mb16' }, [
+    h('div', { class: 'card__body' }, [
+      h('div', { class: 'inspect-toolbar' }, [
+        kwInput, vendorBox, siteBox,
+        h('span', { class: 'small muted' }, '期望发货日'),
+        fromInput, h('span', { class: 'muted' }, '~'), toInput,
+        overdueLabel,
+        h('div', { class: 'inspect-toolbar__spacer' }),
+        clearFilterBtn,
+        h('button', { class: 'btn btn--sm', onclick: () => loadList() }, '刷新'),
+      ]),
+    ]),
+  ]);
+
+  const listCard = h('div', { class: 'card' }, [
+    h('div', { class: 'card__head' }, [
+      h('div', { class: 'card__title' }, '待发货清单'),
+      h('div', { class: 'card__hint' },
+        '一行一单，按期望发货日**从急到缓**排。做完 ERP 发货单后点「去登记发货」'
+        + '到发货跟踪按行登记单号 —— 本页不写数据，也不会自动销掉任何东西'),
+    ]),
+    h('div', { class: 'card__body' }, [sumBox, h('div', { style: { height: '12px' } }),
+      listHost, pagerBox]),
+  ]);
+
+  content.replaceChildren(filterCard, listCard);
+
+  /* ================= 数据加载 ================= */
+  async function loadList() {
+    const params = { page, page_size: PAGE_SIZE };
+    if (keyword) params.keyword = keyword;
+    if (fVendor) params.turbine_vendor = fVendor;
+    if (fSite) params.project_site = fSite;
+    if (dateFrom) params.expect_date_from = dateFrom;
+    if (dateTo) params.expect_date_to = dateTo;
+    if (onlyOverdue) params.only_overdue = 1;
+
+    listHost.replaceChildren(h('div', { class: 'empty' }, '加载中…'));
+    let res;
+    try {
+      res = await api('/delivery/pending?' + buildQuery(params));
+    } catch (e) {
+      listHost.replaceChildren(h('div', { class: 'empty' }, '加载失败：' + e.message));
+      return;
+    }
+    listRows = res.rows || [];
+    total = res.total || 0;
+    summary = res.summary || { orders: total, overdue: 0, qty: 0, partial: 0 };
+    today = res.today || '';
+    renderSummary();
+    renderList();
+    renderPager();
+    countTag.textContent = `${total} 单待发`;
+    countTag.className = 'tag' + (total ? ' tag--brand' : '');
+  }
+
+  function renderPager() {
+    const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    if (pages <= 1) { pagerBox.replaceChildren(); return; }
+    pagerBox.replaceChildren(
+      h('button', {
+        class: 'btn btn--sm', disabled: page <= 1,
+        onclick: () => { page -= 1; loadList(); },
+      }, '上一页'),
+      h('span', { class: 'small muted', style: { padding: '0 6px' } }, `${page} / ${pages}`),
+      h('button', {
+        class: 'btn btn--sm', disabled: page >= pages,
+        onclick: () => { page += 1; loadList(); },
+      }, '下一页'),
+    );
+  }
+
+  function dateCell(r) {
+    const d = r.expect_ship_date || '—';
+    const kids = [h('span', { class: 'mono' }, d)];
+    if (r.overdue_days > 0) {
+      kids.push(h('span', { class: 'dlvp-overdue' }, `超期 ${r.overdue_days} 天`));
+    } else if (r.expect_ship_date && r.expect_ship_date === today) {
+      kids.push(h('span', { class: 'dlvp-today' }, '今天'));
+    }
+    return h('td', {}, h('div', { class: 'dlvp-date' }, kids));
+  }
+
+  /** 发货进度列：已登记的明细行数 / 总明细行数。
+   *  改版后每张单要自己说清「还差几行没做」—— 发货员靠它决定还要不要再跑一趟 ERP。 */
+  function progressCell(r) {
+    const done = r.shipped_lines || 0;
+    const all = r.apply_lines || 0;
+    return h('td', {}, h('div', { class: 'dlvp-prog' }, [
+      h('span', { class: 'mono' }, `${done} / ${all} 行`),
+      done
+        ? h('span', { class: 'dlvp-partial' }, '部分已发')
+        : h('span', { class: 'dlvp-notstart' }, '未开始'),
+    ]));
+  }
+
+  function renderList() {
+    if (!listRows.length) {
+      const hasFilter = keyword || fVendor || fSite || dateFrom || dateTo
+        || onlyOverdue;
+      listHost.replaceChildren(h('div', { class: 'empty' },
+        hasFilter ? '没有符合条件的待发货单'
+          : '没有待发货的申请单 —— 申请单提交后会自动出现在这里'));
+      return;
+    }
+
+    const cols = ['申请单号', '申请人', '申请日期', '期望发货日', '风机厂家',
+      '项目名称', '明细', '发货进度', '收件人', '操作'];
+    const thead = h('thead', {}, h('tr', {}, cols.map(c => h('th', {}, c))));
+
+    const tbody = h('tbody', {}, listRows.map(r => {
+      const acts = [];
+      if (canShip()) {
+        // 跳到发货跟踪并带上单号 —— 那边会自动筛出这张单的全部明细，
+        // 发货员不用再搜一次（待发可以直接登记，已发的能看到进度）。
+        // ★ 用 **<a href>** 而不是 button + location.href：跳转本来就是链接语义，
+        //   而且唯有 <a> 才能让 DOM 校验读得到目标地址（location.href 赋值在
+        //   jsdom 里只会抛「Not implemented: navigation」，读不到跳去哪）。
+        acts.push(h('a', {
+          class: 'btn btn--sm btn--primary',
+          href: '/delivery-track.html?request_no='
+            + encodeURIComponent(r.request_no || ''),
+        }, '去登记发货'));
+      }
+      acts.push(h('button', {
+        class: 'btn btn--sm', style: { marginLeft: '5px' },
+        onclick: () => showDetail(r.request_no),
+      }, '明细'));
+
+      return h('tr', {}, [
+        h('td', { class: 'mono' }, r.request_no || '—'),
+        h('td', {}, r.applicant || '—'),
+        h('td', {}, r.apply_date || '—'),
+        dateCell(r),
+        h('td', {}, r.turbine_vendor || '—'),
+        h('td', {}, r.project_site || '—'),
+        h('td', {}, [
+          `${r.line_count || 0} 种`,
+          h('span', { class: 'muted' }, ` / ${r.total_qty || 0} 件`),
+          r.return_qty ? h('span', { class: 'muted' }, ` · 需还 ${r.return_qty}`) : null,
+        ]),
+        progressCell(r),
+        h('td', {}, [
+          r.ship_contact || '—',
+          r.ship_phone ? h('div', { class: 'small muted mono' }, r.ship_phone) : null,
+        ]),
+        h('td', { class: 'acts' }, acts),
+      ]);
+    }));
+    listHost.replaceChildren(h('table', { class: 'table table--compact dlvp-t' },
+      [thead, tbody]));
+  }
+
+  /* ================= 详情弹窗（复用发货申请页的形态） ================= */
+  async function showDetail(requestNo) {
+    let d;
+    try {
+      d = await api('/delivery/requests/' + encodeURIComponent(requestNo));
+    } catch (e) {
+      toast('读取失败：' + e.message, 'error');
+      return;
+    }
+    const dl = h('dl', {}, [
+      h('dt', {}, '申请单号'), h('dd', { class: 'mono' }, d.request_no || '—'),
+      h('dt', {}, '状态'), h('dd', {}, d.status_label || d.status || '—'),
+      h('dt', {}, '申请人'), h('dd', {}, d.applicant || '—'),
+      h('dt', {}, '申请日期'), h('dd', {}, d.apply_date || '—'),
+      h('dt', {}, '期望发货日'), h('dd', {}, d.expect_ship_date || '—'),
+      h('dt', {}, '风机厂家'), h('dd', {}, d.turbine_vendor || '—'),
+      h('dt', {}, '项目名称'), h('dd', {}, d.project_site || '—'),
+      h('dt', {}, '收件地址'), h('dd', {}, d.ship_address || '—'),
+      h('dt', {}, '联系人'), h('dd', {}, d.ship_contact || '—'),
+      h('dt', {}, '电话'), h('dd', { class: 'mono' }, d.ship_phone || '—'),
+      h('dt', {}, '调换原因'), h('dd', {}, d.replace_reason || '—'),
+      h('dt', {}, '快递要求'), h('dd', {}, d.express_req || '—'),
+    ]);
+    const cols = ['#', '料号', '型号', '品名', '规格', '数量', '需返回'];
+    const thead = h('thead', {}, h('tr', {}, cols.map(c => h('th', {}, c))));
+    const tbody = h('tbody', {}, (d.items || []).map(it => h('tr', {}, [
+      h('td', {}, String(it.line_no)),
+      h('td', { class: 'mono' }, it.material_no || '—'),
+      h('td', { class: 'mono' }, it.product_model || '—'),
+      h('td', {}, it.product_name || '—'),
+      h('td', {}, it.spec || '—'),
+      h('td', {}, String(it.qty)),
+      h('td', {}, it.need_return ? '是' : '否'),
+    ])));
+    const body = h('div', { class: 'dlvp-detail' }, [
+      dl,
+      h('div', { class: 'dlvp-sec__title' },
+        `产品明细 —— 共 ${(d.items || []).length} 种 / ${d.total_qty || 0} 件，`
+        + `其中需返回 ${d.need_return_qty || 0} 件`),
+      h('div', { class: 'table-wrap' }, h('table', {}, [thead, tbody])),
+      h('div', { class: 'hint' },
+        '要登记发货，请在列表里点该单的「去登记发货」—— 到「发货跟踪」页'
+        + '**按产品行**登记 ERP 发货单号（一行的发货信息填一次）。'),
+    ]);
+    const m = openModal({
+      title: '发货申请单 ' + (d.request_no || ''),
+      wide: true, body,
+      footer: [h('button', { class: 'btn', onclick: () => m.close() }, '关闭')],
+    });
+  }
+
+  /* ================= 启动 ================= */
+  // 首屏渲染放在最后：上面的函数依赖本文件中后置声明的 let/const，
+  // 提前调用会触发 TDZ 错误并中断整个 IIFE（本项目记录过的坑）。
+  await loadList();
+  kwInput.focus();
+})();
+</script>
+</body>
+</html>

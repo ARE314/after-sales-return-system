@@ -4,6 +4,7 @@
 其中「服务监听」「公开访问」「鉴权」几节支持环境变量覆盖 ——
 服务器部署时不必改文件，用环境变量注入即可（见 deploy/README 说明）。
 """
+import json
 import os
 from pathlib import Path
 
@@ -39,17 +40,69 @@ STATIC_DIR = BASE_DIR / "static"
 EXPORT_DIR = DATA_DIR / "exports"
 # 照片证据的原图与缩略图（按售后单分子目录）
 PHOTO_DIR = DATA_DIR / "photos"
+# 回收站里照片的暂存目录：`photos_trash/<回收站记录 id>/<售后单号>/<文件名>`。
+# 删除明细时照片是**搬到这里**而不是 unlink —— 否则还原了记录、图却没了，
+# 而照片删除不可逆。超过保留期由回收站清理时真删（见 core/recycle.py）。
+PHOTO_TRASH_DIR = DATA_DIR / "photos_trash"
 
-# ---------- 数据库划分：一个模块一个库 ----------
-# 三库通过 ATTACH 挂到同一连接，跨库 JOIN 的写法与单库一致。
-RETURNS_DB = DATA_DIR / "returns.db"    # 退回登记库：returns / model_dict / 字典 / 日志
-INSPECT_DB = DATA_DIR / "inspect.db"    # 检测登记库：inspect_records / 字典 / 日志
-HANDLE_DB = DATA_DIR / "handle.db"      # 处理登记库：handle_records / 字典 / 日志
-ITEMS_DB = DATA_DIR / "items.db"        # 匹配数据库：item_master
-AUTH_DB = DATA_DIR / "auth.db"          # 接入库：users / permission_group / session
-                                        # / setting / open_api_log（鉴权 + 对外开放）
-# 兼容旧引用（原单库路径）
-DB_PATH = RETURNS_DB
+# ---------- 数据库：MySQL（一个模块一个 schema） ----------
+# 2026-09-22 从「6 个 SQLite 文件 + ATTACH」改成「一个 MySQL 8 实例 + 6 个 schema」。
+# 业务 SQL 里的跨库前缀（inspect_db. / handle_db. / items_db. / auth_db. /
+# delivery_db.）**原样保留** —— MySQL 的 schema.table 原生支持跨库 JOIN；
+# 而连接的默认 schema 就是 returns_db，所以不带前缀的表名照旧落在退回登记库。
+#
+# 连接信息取值优先级：环境变量 ARS_MYSQL_* > data/mysql.json > 下面的默认值。
+# data/mysql.json 由 tools/dev_mysql.py 在装库时生成，data/ 已被 .gitignore 覆盖，
+# 因此密码不会进版本库。
+MYSQL_FILE = DATA_DIR / "mysql.json"
+MYSQL_CONF: dict = {}
+if MYSQL_FILE.exists():
+    try:
+        MYSQL_CONF = json.loads(MYSQL_FILE.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        MYSQL_CONF = {}
+
+
+def _mysql_str(key: str, env: str, default: str) -> str:
+    """环境变量优先，其次 data/mysql.json，最后内置默认值。"""
+    return _env_str(env, str(MYSQL_CONF.get(key, default) or default)) or default
+
+
+def _mysql_int(key: str, env: str, default: int) -> int:
+    if os.getenv(env, "").strip():
+        return _env_int(env, default)
+    try:
+        return int(MYSQL_CONF.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+MYSQL_HOST = _mysql_str("host", "ARS_MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = _mysql_int("port", "ARS_MYSQL_PORT", 3306)
+MYSQL_USER = _mysql_str("user", "ARS_MYSQL_USER", "ars")
+MYSQL_PASSWORD = _mysql_str("password", "ARS_MYSQL_PASSWORD", "")
+MYSQL_CHARSET = _mysql_str("charset", "ARS_MYSQL_CHARSET", "utf8mb4")
+
+# 六个 schema：一个模块一个。名字与旧的 SQLite 文件名对齐，
+# 所以几百处跨库前缀（inspect_db.xxx）一个字都不用改。
+RETURNS_DB = "returns_db"       # 退回登记库：returns / model_dict / 字典 / 日志
+INSPECT_DB = "inspect_db"       # 检测登记库：inspect_records / 字典 / 日志
+HANDLE_DB = "handle_db"         # 处理登记库：handle_records / 字典 / 日志
+ITEMS_DB = "items_db"           # 匹配数据库：item_master
+AUTH_DB = "auth_db"             # 接入库：users / permission_group / session / setting
+DELIVERY_DB = "delivery_db"     # 发货库：delivery_request / ship_detail / ...
+MAIN_SCHEMA = RETURNS_DB        # 连接默认 schema：不带前缀的表名落在这里
+SCHEMAS = (RETURNS_DB, INSPECT_DB, HANDLE_DB, ITEMS_DB, AUTH_DB, DELIVERY_DB)
+
+# 逐项复刻 MySQL 8 默认的 sql_mode，**只去掉 ONLY_FULL_GROUP_BY**。
+# 原因：SQLite 允许「GROUP BY 后直接选非聚合列」（取该组任意一行），本项目的
+# 聚合查询大量依赖这个行为。留着 ONLY_FULL_GROUP_BY 会在页面请求里抛 1055，
+# 而且报错点离出错的 SQL 很远，很难定位。其余严格项一个不少地保留。
+MYSQL_SQL_MODE = _env_str(
+    "ARS_MYSQL_SQL_MODE",
+    "STRICT_TRANS_TABLES,NO_ZERO_DATE,NO_ZERO_IN_DATE,"
+    "ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION",
+)
 
 # ---------- 服务监听 ----------
 # 127.0.0.1 = 仅本机可访问（默认，开发调试用）
@@ -101,7 +154,7 @@ OPEN_API_IPS = _env_list("ARS_OPEN_API_IPS")
 OPEN_API_SCOPES = _env_list("ARS_OPEN_API_SCOPES") or ["detail"]
 
 # ---------- 数据备份 ----------
-# 备份工具：`python tools/backup.py`（五库 VACUUM INTO 快照 + 照片 + 轮转）。
+# 备份工具：`python tools/backup.py`（六库 VACUUM INTO 快照 + 照片 + 轮转）。
 # 状态落在 data/backup_status.json，界面据此提示「备份是否超期」。
 # 为什么要在界面上提示：定时任务失败是**静默**的 —— 没人盯 journal，
 # 等到需要恢复时才发现最近一份是三个月前的，那时已经来不及了。
@@ -109,18 +162,6 @@ BACKUP_STATUS_FILE = DATA_DIR / "backup_status.json"
 # 超过这个小时数没有成功备份就告警。默认 30：按「每天一次」的节奏，
 # 偶发漏一次（关机、磁盘满）不会立刻飘红，漏两天就会。
 BACKUP_STALE_HOURS = _env_int("ARS_BACKUP_STALE_HOURS", 30)
-
-# ---------- 金山侧目标位置（初始默认值，不驱动本系统任何行为）----------
-# 这三项是给配置者在金山侧建定时任务时抄用的备忘。2026-09-20 起已改为
-# **「数据接口」页可填写**（存 auth_db.setting 的 kdocs_target），
-# 换文件或换工作表在界面上改即可，不用动这里。
-# 这里的值只在「从没在界面上保存过」时作为初始值出现，
-# 见 core/openapi.py 的 kdocs_target()；页面上的「恢复默认」也回到这里。
-KDOCS_TARGET = {
-    "file_id": "qAqmwXpUP1Mji2UbPz7orxkqEBjTbWH4Z",   # 售后信息登记（2026）.xlsx
-    "drive_id": "614043991",
-    "sheet": "服务器数据",
-}
 
 # ---------- 业务默认值 ----------
 DEFAULT_REGISTRAR = "管理员"      # 默认登记人
@@ -165,11 +206,12 @@ RETURNS_DICT_FIELDS = [
     "feedback_issue", "info_source", "production_stat",
 ]
 # 检测登记库的字典字段（候选值由检测登记数据汇总）
-# 注意：solution / issue_category / responsibility 不在此列 ——
+# 注意：solution / issue_category / responsibility / completion 不在此列 ——
 # 它们已改为「纯下拉锁定项」（见 FIXED_OPTIONS），不再自动积累候选。
+# completion 尤其不能靠积累：未完结存的是**空值**，永远进不了候选表，
+# 结果筛选下拉里只有「已完结」一项（2026-09-22 用户报的另一个现象）。
 INSPECT_DICT_FIELDS = [
     "test_result", "fault_cause", "improvement",
-    "completion",
 ]
 # 处理登记库的字典字段（2026-09-20 从检测登记拆出，见 handle.db）
 # 注意：erp_handled 已改为「纯下拉锁定项」（见 FIXED_OPTIONS），不再积累候选 ——
@@ -202,11 +244,150 @@ COMPLETION_FIELDS = [
     "solution", "issue_category", "responsibility",
 ]
 COMPLETION_DONE = "已完结"
+# 未完结态。**存储层仍然是空值**（跨库判定统一用 `NOT LIKE '%完结%'`，见本节末尾），
+# 但在**读取 / 展示 / 筛选**三处都归一成这个值 —— 否则同一个字段会出现
+# 「筛选下拉里没有『未完结』、明细里显示『未填写』」这种自相矛盾的表现
+# （2026-09-22 用户报的就是这个）。机制照 `HANDLE_DEFAULT_VALUES`。
+COMPLETION_PENDING = "未完结"
+# 检测侧字段的空值归一表（与 HANDLE_DEFAULT_VALUES 同一机制，见 repository._value_expr）。
+# ⚠️ 归一值**只用在下游展示/筛选**：写库仍是空值，SQL 里的裸列判定不受影响。
+INSPECT_DEFAULT_VALUES = {
+    "completion": COMPLETION_PENDING,
+}
 # 明确排除在判定之外的字段 —— 供文档与工具输出统一引用，
 # 避免说明文案与 COMPLETION_FIELDS 各自漂移。
 # 三者都是「事后登记」性质：erp_handled 现已拆到处理登记模块（handle.db），
 # 报告编号与照片证据仍留在检测登记库，但同样不参与完结判定。
 COMPLETION_EXCLUDED = ["report_no", "photo_evidence", "erp_handled"]
+# ---------- 发货申请：状态机与单号 ----------
+# **不做审批流程**：提交即进入待发货队列。下面两个取值是给将来接审批预留的
+# 扩展点，当前不可达（详见《发货申请单-字段定义》第四节与《框架大纲》5.2）。
+DELIVERY_STATUS = {
+    "draft":     "草稿",
+    "submitted": "已提交",   # 无审批时：提交后直接到此，同时进入「待发货清单」
+    "shipped":   "已发货",
+    "closed":    "已关闭",
+    # ---- 审批流程预留，当前不可达 ----
+    # "pending_approval": "待审批",
+    # "rejected":         "已驳回",
+}
+# 新建申请单提交后的落库状态
+DELIVERY_STATUS_SUBMIT = "submitted"
+# 出队（标记已发货）后的状态 —— ② 待发货清单据此把单子移出队列
+DELIVERY_STATUS_SHIPPED = "shipped"
+# 单号规则：FH + YYYYMMDD + 3 位当日流水（例 FH20260921001）
+DELIVERY_NO_PREFIX = "FH"
+DELIVERY_NO_SEQ_WIDTH = 3
+
+# ---------- 发货记录（delivery_shipment）----------
+# ★ 2026-09-21 改版：发货记录不再由「待发货清单标记已发货」产生，
+#   而是**发货员在 ③ 发货跟踪页对某一行登记**时产生（sources 里的 "request"）。
+#   待发货清单从此**不写任何数据**（纯只读清点视图）。
+DELIVERY_SHIP_SOURCES = {
+    "request": "按申请单登记",   # ③ 发货跟踪：对申请明细行登记（主流程）
+    "import":  "批量导入",       # ③ 发货跟踪：Excel 粘贴；将来 ERP 同步也走这里
+    "manual":  "手工登记",       # 历史数据（入口已于 2026-09-21 移除）
+    # "erp":   "ERP 同步",       # 预留：接 ERP 发货清单时启用
+}
+DELIVERY_SHIP_SOURCE_DEFAULT = "request"
+
+# ③ 发货跟踪的**三种行态**（列表里每行必居其一）：
+#   pending  —— 申请已提交、还没登记发货（这是列表主体，申请一提交就有）
+#   shipped  —— 已登记发货，带着 ERP 单号
+#   unlinked —— 有发货记录但对不上申请明细（导入/ERP 来的），等人工挂接
+# 「发货跟踪」跟踪的就是**申请了的货发出去了没有**，所以主体是申请明细，
+# 而不是发货记录 —— 后者只反映"已经发生的事"，回答不了"还差哪些"。
+DELIVERY_TRACK_STATES = {
+    "pending":  "待发货",
+    "shipped":  "已发货",
+    "unlinked": "未关联",
+}
+# 发货记录可写字段
+DELIVERY_SHIP_FIELDS = (
+    "request_no", "ship_no", "ship_date", "express_no", "carrier",
+    "qty", "source", "remark", "sync_at",
+    "line_no", "material_no", "product_model", "need_return",
+)
+
+# ---------- 发货明细（ship_detail）----------
+# 发货模块下的**只读镜像**：把 ERP(U9) 的出货明细整表拉到本地，供查询与追溯。
+#
+# ⚠️ 为什么另建一张表，而不是直接写进 delivery_shipment：
+#   delivery_shipment 是**核销工作集** —— 每一行都要挂到申请明细上（request_no）、
+#   并参与「核销台账」的收发差额计算。ERP 那 8.9 万行出货明细一旦灌进去，
+#   发货跟踪的「未关联」桶会立刻涨到 8.9 万行、台账差额随之失去意义。
+#   发货明细回答的是「ERP 里到底发了哪些货」，是**参照数据**，不是核销对象。
+#   （原设计确实预留了 source='erp' 写 delivery_shipment 的路子 ——
+#     要做「按 ERP 发货单号核销」时再启用，不是这张表的职责。）
+SHIP_DETAIL_STATUS = {0: "草稿", 1: "开立", 2: "核准中", 3: "已核准"}
+# ⚠️ 状态**必须**在 SQL 里只取原始整数：cp936 连接下中文常量按 varchar 送达、
+#   与库排序规则不匹配，整列会返回乱码（实测 `ò?o?×?`）。翻译在 Python 本地做。
+SHIP_DETAIL_STATUS_ORDER = ["已核准", "核准中", "开立", "草稿"]
+# 列表默认只看已核准 ——「草稿 / 开立」是还没真正出库的单据，
+# 混进明细里会让「发了多少」这个数偏大。
+SHIP_DETAIL_DEFAULT_STATUS = "已核准"
+
+# 明细字段：(列名, 表头, 是否纳入关键词搜索)
+SHIP_DETAIL_COLUMNS = (
+    ("doc_date",      "日期",     False),
+    ("doc_status",    "状态",     False),
+    ("doc_no",        "单号",     True),
+    ("doc_type",      "单据类型", True),
+    ("material_no",   "料号",     True),
+    ("material_name", "料品名称", True),
+    ("spec",          "规格",     True),
+    ("product_model", "型号",     True),
+    ("qty",           "出货数量", False),
+    ("serial_no",     "序列号",   True),
+    ("customer",      "客户名称", True),
+    ("contact",       "联系人",   True),
+    ("express_no",    "承运单号", True),
+    ("address",       "地址",     True),
+)
+SHIP_DETAIL_HEADERS = [c[1] for c in SHIP_DETAIL_COLUMNS]
+SHIP_DETAIL_SEARCH_FIELDS = [c[0] for c in SHIP_DETAIL_COLUMNS if c[2]]
+# 可排序字段（含同步时间，便于看「这批是哪次拉进来的」）
+SHIP_DETAIL_SORTABLE = [c[0] for c in SHIP_DETAIL_COLUMNS] + ["sync_at"]
+SHIP_DETAIL_DEFAULT_SORT = "-doc_date"
+
+SHIP_DETAIL_PAGE_SIZE = 50
+SHIP_DETAIL_MAX_PAGE_SIZE = 500
+SHIP_DETAIL_EXPORT_PREFIX = "发货明细"
+# 导出上限：全量 8.9 万行 CSV 约 24 MB，属正常用法；
+# 这个数只是防「误点导出把内存打满」，不是产品限制。
+SHIP_DETAIL_EXPORT_LIMIT = 200000
+# 超过这个小时数没同步过，页面打「已超期」。
+# 给到 3 天是因为出货明细是**月度对账**用的参照数据，不是实时台账。
+SHIP_DETAIL_STALE_HOURS = 72
+# 同步状态文件
+SHIP_DETAIL_STATUS_FILE = DATA_DIR / "ship_detail_status.json"
+
+# ---------- 核销台账（ledger_clear）----------
+# 核销维度：**整机厂家 + 项目风场**（2026-09-22 用户口径）。
+#
+# ⚠️ 变过两次，别再按老注释去改：
+#   ① 最早大纲写「料号」—— 实测退回侧 material_no 100% 为空，不可用；
+#   ② 中途改成「厂家 + 风场 + 产品型号」—— 型号是收发两侧唯一的共同语言，能算；
+#   ③ 2026-09-22 用户定调**去掉型号**：台账要看的是「这个风场到底还差多少台没回来」，
+#      型号一拆，同一次发货会被切成好几行，用户要自己心算合计 —— 反而更难用。
+#      （型号仍在发货行明细与二级页里展示，只是不参与维度聚合。）
+DELIVERY_LEDGER_DIMENSIONS = ("turbine_vendor", "project_site")
+# 手工清账的原因最少字数（台账上唯一要人写理由的地方，太短等于没写）
+DELIVERY_CLEAR_REASON_MIN = 2
+# 台账导出的文件名前缀
+DELIVERY_LEDGER_EXPORT_PREFIX = "核销台账"
+
+# 发货明细的「产品」是模糊搜索框：命中候选只返回前 N 条，
+# 其余靠继续输入关键词收窄（避免「风速」这类词一发命中几百条把面板撑爆）。
+DELIVERY_MATCH_LIMIT = 40
+# 打分权重 —— 高 → 低。料号唯一、命中即定，排最高；描述只作兜底，最低。
+# 型号给了「前缀」档：用户常常只记得型号前几个字符（如 BLDL03）。
+DELIVERY_MATCH_SCORES = {
+    "material_no_exact": 1000, "material_no_prefix": 800, "material_no_part": 600,
+    "model_exact": 500, "model_prefix": 450, "model_part": 400,
+    "name_part": 300, "spec_part": 200, "desc_part": 100,
+}
+
 # 未完结存空值而非「未完结」—— 跨库判定统一用 `completion NOT LIKE '%完结%'`，
 # 这样「没检测过」与「检测了但没填完」在 SQL 里表现一致。
 # 全部字典字段（前端一次性拉取候选时使用）
@@ -223,6 +404,14 @@ PHOTO_THUMB_SIZE = (320, 320)          # 缩略图长边上限
 PHOTO_THUMB_QUALITY = 82
 # 允许的图片格式（Pillow 可解码为准；HEIC 需额外依赖，暂不支持）
 PHOTO_EXTS = [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"]
+
+# ---------- 回收站 ----------
+# 删除的记录（含关联的检测 / 处理登记行与照片文件）保留多少天。
+# 照片是「搬进 photos_trash 暂存」而不是删除，所以保留期内还原能连图一起回来；
+# 过期的由定时器清理，彻底删除。
+RECYCLE_DAYS = 7
+# 过期清理的节拍（小时）。启动时也会先清一次，所以停机再久也不会漏。
+RECYCLE_PURGE_HOURS = 6
 
 # ---------- 快递公司 ----------
 # 人工选择时的候选清单（登记页为纯下拉，不接受自由输入）
@@ -246,6 +435,9 @@ FIXED_OPTIONS = {
     # （见 HANDLE_DEFAULT_VALUES），因此这里必须给出「待处理」这一项，
     # 否则用户看到的是默认值却选不回去。
     "erp_handled": ["已处理", "待处理"],
+    # 完结状况：两值枚举。**「未完结」必须在清单里**，否则用户看到的是
+    # 归一后的「未完结」，想筛它却无此项可选（它本来就没存进库）。
+    "completion": [COMPLETION_DONE, COMPLETION_PENDING],
     "analysis_report": ["是", "否"],
     "carrier": CARRIER_OPTIONS,
     # --- 检测结论类：口径锁定，不接受自由输入 ---
@@ -305,7 +497,27 @@ FIELD_LABELS = {
     "info_source": "快递归属",
     "completion": "完结状况",
     "source": "数据来源",
-    "sync_state": "同步状态",
+    # ---- 发货申请（主表 + 明细）----
+    "request_no": "申请单号",
+    "applicant": "申请人",
+    "apply_date": "申请日期",
+    "status": "状态",
+    "expect_ship_date": "期望发货日",
+    "ship_address": "收件地址",
+    "ship_contact": "联系人",
+    "ship_phone": "电话",
+    "replace_reason": "调换原因",
+    "express_req": "快递要求",
+    "qty": "数量",
+    "need_return": "是否需要返回",
+    "description": "物料描述",
+    # ---- 发货记录（delivery_shipment）----
+    # 注意：carrier（快递公司）/ remark（备注）/ source（数据来源）三个 key
+    # 上面已有，直接复用，不要重复定义（后写的会覆盖前写的）。
+    "ship_no": "发货单号",
+    "ship_date": "发货日期",
+    "express_no": "物流单号",
+    "sync_at": "同步时间",
 }
 
 # 匹配数据库（物料主档）字段中文名

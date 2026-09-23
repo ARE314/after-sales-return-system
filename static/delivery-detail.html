@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>发货明细 · 售后返件登记系统</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260923b">
+  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260923b">
+<link rel="stylesheet" href="/static/assets/app.css?v=20260923b">
+<style>
+  /* ================= 页面专属样式（只服务发货明细页）================= */
+  .sd-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+  .sd-tab {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 13px; padding: 4px 10px; border-radius: 999px;
+    border: 1px solid var(--border); background: var(--bg-card);
+    color: var(--text-secondary); cursor: pointer; white-space: nowrap;
+    font-family: inherit;
+  }
+  .sd-tab:hover { border-color: var(--brand); color: var(--brand); }
+  .sd-tab.on { background: var(--brand); border-color: var(--brand); color: #fff; }
+  .sd-tab__n { font-size: 11.5px; opacity: .78; font-variant-numeric: tabular-nums; }
+
+  .sd-sum { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .sd-sum__item { display: flex; align-items: baseline; gap: 5px; }
+  .sd-sum__n { font-size: 19px; font-weight: 650; color: var(--text-primary); line-height: 1; }
+  .sd-sum__k { font-size: 12px; color: var(--text-tertiary); }
+  .sd-sum__sep { width: 1px; height: 22px; background: var(--border); }
+
+  /* 14 列 —— 宽窄交给 `.table` 自己的 width:max-content（列多就横向滚动、列少才铺满）。
+     ★ 千万不要在这里写 width:100%：列一多就被压得比表头文字还窄，而表头是 nowrap
+     且没有截断规则，文字会溢出压到隔壁列上（界面变形）。app.css 的「表格」段
+     已经写过这条教训 —— 本页原来正是踩了它。
+
+     这里只补 `.table` 没有的东西。顺便记两个我踩过的坑：
+     ① 表格必须**同时**带 `.table`。原来只写 `sd-t`，于是没有内边距、没有分隔线、
+        没有吸顶表头 —— 看起来就是「挤成一坨、跟别的页面不一样」。
+     ② 不要重新定义 `.mono`（app.css:511 已有全局工具类）。原来那行把字体写成
+        `var(--mono)`，而 `:root` 里根本没有这个名字（只有 `--font-mono`），
+        于是字号与等宽字体都没生效。同理 `.num` 也由 `.table .num` 统一提供。
+
+     还要注意换行单元格应改用全局的 `.cell-wrap`（app.css:307），
+     自己写 `word-break: break-all` 会把英文与数字从词中间劈开。
+
+     ③ 地址列必须单独放宽。app.css 的 `.table .cell-wrap{max-width:300px}`
+        是「所有可换行列一视同仁」，但地址是这一页最需要读全的一列：
+        实测 P50=26 字、P75=32 字、P90=39 字，而 300px 只放得下 22 个汉字
+        ——于是绝大多数地址被折成两行，第二行常常只剩一两个字
+        （`广西贵港市桂平市友和冲桂平荔景能源技术有限公司` 的「司」单独掉到
+        第二行），行高在 32px / 50px 之间跳。用户报的「地址变形了」就是它。
+        放宽到 460px（≈35 汉字，覆盖到 P85）之后，常见地址一行放得下，
+        行高稳定；再长的用两行 + `line-clamp` 截住，并挂 `title` 看全文。 */
+  table.sd-t td.cell-wrap.sd-addr,
+  table.sd-t th.sd-addr { min-width: 460px; max-width: 460px; }
+  /* td 上的 max-height 在表格布局里不被遵守（CSS 2.1：单元格 height 只当
+     最小值用），所以截断只能做在内层 div 上，用两行 line-clamp。 */
+  table.sd-t .sd-addr__in {
+    display: -webkit-box; -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
+  }
+  table.sd-t th.sortable { cursor: pointer; user-select: none; }
+  table.sd-t th.sortable:hover { color: var(--brand); }
+  table.sd-t th .sd-arrow { margin-left: 4px; color: var(--brand); font-size: 10px; }
+  table.sd-t td.dim { color: var(--text-tertiary); }
+
+  /* 三个筛选下拉是 combobox（.cb 默认 position:relative 无宽度），
+     筛选条用 flex 排布，给它一个固定宽度才不会随输入内容抽动。 */
+  .sd-cb { flex: 0 0 200px; width: 200px; }
+
+  .sd-st {
+    font-size: 10.5px; font-weight: 600; border-radius: 3px;
+    padding: 1px 5px; white-space: nowrap;
+  }
+  .sd-st.approved { color: var(--success); background: #eef9f1; border: 1px solid #bfe3ca; }
+  .sd-st.approving { color: var(--warning); background: #fff8ec; border: 1px solid #f2ddb4; }
+  .sd-st.open { color: var(--brand); background: #eef4fe; border: 1px solid #c9dcf8; }
+  .sd-st.draft { color: var(--text-tertiary); background: var(--bg-subtle);
+    border: 1px solid var(--border); }
+
+  .sd-stale { font-size: 12px; line-height: 1.75; }
+</style>
+</head>
+<body>
+<script src="/static/assets/common.js?v=20260923b"></script>
+<script>
+(async () => {
+  const countTag = h('span', { class: 'tag' }, '— 行');
+  const content = await mountLayout('delivery-detail', '发货明细',
+    'ERP（U9）出货明细的本地镜像 —— 数据全部来自 ERP，本地不手工增改，'
+    + '也不参与核销台账的差额计算；它回答的是「ERP 里到底发了哪些货」',
+    [countTag]);
+
+  /* ================= 列与状态定义 =================
+     与 config.py 的 SHIP_DETAIL_COLUMNS / SHIP_DETAIL_STATUS_ORDER 一致。
+     页面是静态的、读不到 Python 常量，所以这里必然是一份副本 ——
+     改动任一侧时两处都要改（tests/check_frontend.js 有对应断言兜住）。 */
+  const COLUMNS = [
+    ['doc_date', '日期'], ['doc_status', '状态'], ['doc_no', '单号'],
+    ['doc_type', '单据类型'], ['material_no', '料号'],
+    ['material_name', '料品名称'], ['spec', '规格'], ['product_model', '型号'],
+    ['qty', '出货数量'], ['serial_no', '序列号'], ['customer', '客户名称'],
+    ['contact', '联系人'], ['express_no', '承运单号'], ['address', '地址'],
+  ];
+  const SORTABLE = new Set(COLUMNS.map(c => c[0]).concat(['sync_at']));
+  const STATUS_ORDER = ['已核准', '核准中', '开立', '草稿'];
+  const STATUS_CLASS = {
+    '已核准': 'approved', '核准中': 'approving', '开立': 'open', '草稿': 'draft',
+  };
+  const PAGE_SIZE = 50;
+  /* 地址列 460px 一行约放 35 个汉字（与 <style> 里 sd-addr 的宽度对应）——
+     超过这个长度的地址会被两行 line-clamp 截住，那种才需要挂全文 tooltip。 */
+  const ADDR_FIT = 35;
+
+  /* ================= 列表状态 ================= */
+  let rows = [];
+  let total = 0;
+  let page = 1;
+  let stats = { total: 0, by_status: {}, filtered: {} };
+  let keyword = '';
+  // '' = 全部状态。**这个空串必须真的发出去**（见 buildParams），
+  // 不能像别处那样「空值就不带参数」—— 后端的两种「空」是不同含义：
+  // 不传 = 默认只看「已核准」，传空串 = 全部。
+  let fStatus = '已核准';
+  let fDocType = '';
+  let fCustomer = '';
+  let fModel = '';
+  let dateFrom = '';
+  let dateTo = '';
+  let sortBy = 'doc_date';
+  let sortDir = 'desc';
+
+  function apiErr(e) {
+    return (e.detail && e.detail.message) ? e.detail.message
+      : (typeof e.detail === 'string' ? e.detail : e.message);
+  }
+
+  function buildParams(extra) {
+    const sp = new URLSearchParams();
+    // ⚠️ doc_status 无条件带上（含空串）—— 后端靠「有没有这个参数」区分
+    // 「默认已核准」与「全部」，空值省略会让「全部」变成「已核准」。
+    sp.set('doc_status', fStatus);
+    if (keyword) sp.set('keyword', keyword);
+    if (fDocType) sp.set('doc_type', fDocType);
+    if (fCustomer) sp.set('customer', fCustomer);
+    if (fModel) sp.set('product_model', fModel);
+    if (dateFrom) sp.set('date_from', dateFrom);
+    if (dateTo) sp.set('date_to', dateTo);
+    if (sortBy) { sp.set('sort_by', sortBy); sp.set('sort_dir', sortDir); }
+    Object.entries(extra || {}).forEach(([k, v]) => sp.set(k, v));
+    return sp;
+  }
+
+  function qtyText(v) {
+    // ERP 的 ShipQtyInvAmount 是 decimal，直接显示会是 `2.000000000`。
+    if (v === null || v === undefined || v === '') return '';
+    const n = Number(v);
+    if (!Number.isFinite(n)) return String(v);
+    return String(Math.round(n * 1000) / 1000);
+  }
+
+  /* ================= 顶部状态切换 ================= */
+  const tabsBox = h('div', { class: 'sd-tabs' });
+  function renderTabs() {
+    const counts = stats.by_status || {};
+    // 先按固定顺序列，再补上数据里出现过、但不在固定顺序里的状态
+    // （core/erp_ship.py 对认不出的状态码会写成 `未知(n)` 并保留可见 ——
+    //   这里必须让它也有自己的页签，否则那批行会从所有筛选里凭空消失）。
+    const known = STATUS_ORDER.slice();
+    Object.keys(counts).forEach(s => { if (!known.includes(s)) known.push(s); });
+
+    const items = [['', '全部', stats.total || 0]];
+    known.forEach(s => items.push([s, s, counts[s] || 0]));
+
+    tabsBox.replaceChildren(...items.map(([value, label, n]) => {
+      const on = fStatus === value;
+      return h('button', {
+        class: 'sd-tab' + (on ? ' on' : ''),
+        onclick: () => { if (!on) { fStatus = value; page = 1; loadAll(); } },
+      }, [label, h('span', { class: 'sd-tab__n' }, String(n))]);
+    }));
+  }
+
+  /* ================= 汇总条 ================= */
+  const sumBox = h('div', { class: 'sd-sum' });
+  function renderSummary() {
+    const f = stats.filtered || {};
+    const mk = (n, k) => h('div', { class: 'sd-sum__item' }, [
+      h('span', { class: 'sd-sum__n' }, String(n)),
+      h('span', { class: 'sd-sum__k' }, k),
+    ]);
+    sumBox.replaceChildren(
+      mk(f.rows === undefined ? 0 : f.rows, '条当前筛选'),
+      h('div', { class: 'sd-sum__sep' }),
+      mk(qtyText(f.qty) || '0', '件'),
+      h('div', { class: 'sd-sum__sep' }),
+      mk(f.docs === undefined ? 0 : f.docs, '张单'),
+      h('div', { class: 'sd-sum__sep' }),
+      mk(f.materials === undefined ? 0 : f.materials, '个料号'),
+    );
+  }
+
+  /* ================= 筛选区 ================= */
+  const kwInput = h('input', {
+    class: 'input', type: 'text', style: { width: '220px' },
+    placeholder: '单号 / 料号 / 品名 / 型号 / 序列号 / 承运单号…',
+  });
+  let kwTimer = null;
+  kwInput.addEventListener('input', () => {
+    clearTimeout(kwTimer);
+    kwTimer = setTimeout(() => {
+      keyword = kwInput.value.trim(); page = 1; loadAll();
+    }, 320);
+  });
+
+  /* 三个下拉都必须是 combobox，不能是 fixedSelect：
+     fixedSelect 只有 getValue/setValue、**没有 setOptions**，原来那句
+     `if (sel.setOptions) sel.setOptions(opts)` 于是永远为假 —— 候选值从服务器
+     取回来之后被静默丢掉，三个下拉各剩一个「全部…」占位项，一个也筛不了。
+     （这就是「筛选项无法筛选」的根因。）
+     而且这里也只能用 combobox：客户有 1776 个取值、型号 1090 个，而
+     /options 的 limit 上限是 200，原生 select 装不下长尾；combobox 的
+     remoteSearch 能一边打字一边远程检索，才够用。 */
+  const CAND = { doc_type: [], customer: [], product_model: [] };
+
+  function setFilter(field, value) {
+    const cur = field === 'doc_type' ? fDocType
+      : (field === 'customer' ? fCustomer : fModel);
+    if (cur === value) return;          // 重复选同一个值不必再查一次
+    if (field === 'doc_type') fDocType = value;
+    else if (field === 'customer') fCustomer = value;
+    else fModel = value;
+    page = 1; loadAll();
+  }
+
+  const optSel = (field, placeholder) => combobox({
+    name: 'sd_' + field, value: '', placeholder, className: 'sd-cb',
+    // 筛选走的是精确匹配，值必须是库里真实存在的取值。允许「新建」会让一个
+    // 错别字变成一个空列表，用户又会以为「筛选坏了」。
+    allowNew: false,
+    options: [],
+    // 单据类型只有 8 个取值，本地候选就够，不必再打网络
+    remoteSearch: field === 'doc_type' ? null : (async kw => {
+      const r = await api('/delivery/details/options?field='
+        + encodeURIComponent(field) + '&keyword=' + encodeURIComponent(kw)
+        + '&limit=50');
+      return (r.rows || []).map(o => ({
+        value: o.value, meta: o.count ? `${num(o.count)} 行` : undefined,
+      }));
+    }),
+    onChange: v => setFilter(field, v),
+    onEnter: v => {
+      const val = String(v || '').trim();
+      if (!val) { setFilter(field, ''); return; }   // 清空输入 = 不筛
+      if (CAND[field].some(o => String(o.value) === val)) { setFilter(field, val); return; }
+      toast('「' + val + '」不在候选里 —— 筛选是精确匹配，请从下拉里选一个值', 'warn');
+    },
+  });
+  const docTypeSel = optSel('doc_type', '全部单据类型');
+  const customerSel = optSel('customer', '全部客户');
+  const modelSel = optSel('product_model', '全部型号');
+
+  async function loadOptions() {
+    // 候选值**不预先算好堆在接口里**：8.9 万行下，客户/型号的 DISTINCT
+    // 每次开页都算一遍是白白烧时间。改成进页面时取一次、下拉里还能打字过滤。
+    const jobs = [
+      ['doc_type', docTypeSel], ['customer', customerSel],
+      ['product_model', modelSel],
+    ];
+    await Promise.all(jobs.map(async ([field, sel]) => {
+      try {
+        const r = await api('/delivery/details/options?field='
+          + encodeURIComponent(field) + '&limit=200');
+        CAND[field] = (r.rows || []).map(o => ({
+          value: o.value, meta: o.count ? `${num(o.count)} 行` : undefined,
+        }));
+      } catch (e) {
+        // 取不到候选值不挡住主流程（客户/型号还能靠远程检索），但要让人知道。
+        // 静默吞掉异常正是上一个缺陷能藏这么久的原因。
+        toast('「' + field + '」候选值加载失败：'
+          + (e && e.message ? e.message : e), 'warn');
+      }
+      // 这句也必须能兜住：它一抛，loadOptions 返回的 Promise 就无人接管，
+      // 它后面所有的初始化都不会再跑 —— 一个下拉不该能让整页瘫掉。
+      try { sel.setOptions(CAND[field]); }
+      catch (e) {
+        toast('「' + field + '」下拉初始化失败：'
+          + (e && e.message ? e.message : e), 'warn');
+      }
+    }));
+  }
+
+  function dateInput(which) {
+    const el = h('input', { class: 'input', type: 'date', style: { width: '140px' } });
+    el.addEventListener('change', () => {
+      if (which === 'from') dateFrom = el.value; else dateTo = el.value;
+      page = 1; loadAll();
+    });
+    return el;
+  }
+  const fromInput = dateInput('from');
+  const toInput = dateInput('to');
+
+  const exportBtn = h('button', {
+    class: 'btn btn--sm', onclick: () => exportXlsx(),
+  }, '导出当前筛选');
+
+  const listHost = h('div', { class: 'table-wrap' });
+  const pagerBox = h('div', { class: 'pager' });
+
+  const filterCard = h('div', { class: 'card mb16' }, [
+    h('div', { class: 'card__body' }, [
+      h('div', { class: 'inspect-toolbar' }, [
+        kwInput, docTypeSel, customerSel, modelSel,
+        h('span', { class: 'small muted' }, '出货日期'),
+        fromInput, h('span', { class: 'muted' }, '~'), toInput,
+        h('div', { class: 'inspect-toolbar__spacer' }),
+        exportBtn,
+        h('button', { class: 'btn btn--sm', onclick: () => loadAll() }, '刷新'),
+      ]),
+      h('div', { style: { height: '10px' } }),
+      tabsBox,
+    ]),
+  ]);
+
+
+  const listCard = h('div', { class: 'card' }, [
+    h('div', { class: 'card__head' }, [
+      h('div', { class: 'card__title' }, 'ERP 出货明细'),
+      h('div', { class: 'card__hint' },
+        '一行 = ERP 出货单里的一条物料行（一张单 N 行物料就是 N 行）；'
+        + '点列头可排序'),
+    ]),
+    h('div', { class: 'card__body' }, [
+      sumBox, h('div', { style: { height: '12px' } }), listHost, pagerBox,
+    ]),
+  ]);
+
+  content.replaceChildren(filterCard, listCard);
+
+  /* ================= 数据加载 ================= */
+  async function loadAll() {
+    listHost.replaceChildren(h('div', { class: 'empty' }, '加载中…'));
+    let res;
+    let st;
+    try {
+      [res, st] = await Promise.all([
+        api('/delivery/details?' + buildParams({ page, page_size: PAGE_SIZE })),
+        api('/delivery/details/stats?' + buildParams()),
+      ]);
+    } catch (e) {
+      listHost.replaceChildren(h('div', { class: 'empty' },
+        '加载失败：' + apiErr(e)));
+      return;
+    }
+    rows = res.rows || [];
+    total = res.total || 0;
+    stats = st || stats;
+    renderTabs();
+    renderSummary();
+    renderTable();
+    renderPager();
+    countTag.textContent = `${total} 行`;
+    countTag.className = 'tag' + (total ? ' tag--brand' : '');
+  }
+
+  function renderPager() {
+    const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    if (pages <= 1) { pagerBox.replaceChildren(); return; }
+    pagerBox.replaceChildren(
+      h('button', {
+        class: 'btn btn--sm', disabled: page <= 1,
+        onclick: () => { page -= 1; loadAll(); },
+      }, '上一页'),
+      h('span', { class: 'small muted', style: { padding: '0 6px' } },
+        `${page} / ${pages}`),
+      h('button', {
+        class: 'btn btn--sm', disabled: page >= pages,
+        onclick: () => { page += 1; loadAll(); },
+      }, '下一页'),
+    );
+  }
+
+  function statusTag(v) {
+    if (!v) return h('span', { class: 'sd-st draft' }, '—');
+    return h('span', { class: 'sd-st ' + (STATUS_CLASS[v] || 'draft') }, v);
+  }
+
+  function cellOf(key, r) {
+    const v = r[key];
+    switch (key) {
+      case 'doc_status': return h('td', {}, statusTag(v));
+      case 'qty': return h('td', { class: 'num' }, qtyText(v));
+      case 'doc_no': return h('td', { class: 'mono' }, v || '');
+      case 'address': {
+        const s = v || '';
+        const attrs = { class: 'cell-wrap sd-addr' };
+        if (s.length > ADDR_FIT) attrs.title = s;
+        return h('td', attrs, h('div', { class: 'sd-addr__in' }, s));
+      }
+      case 'material_name':
+      case 'customer':
+        return h('td', { class: 'cell-wrap' }, v || '');
+      // 序列号只有约 20% 有值，空值占多数 —— 空的地方留一个浅色破折号，
+      // 免得满屏空白让人以为列渲染坏了。
+      case 'serial_no':
+        return v ? h('td', { class: 'mono' }, v)
+                 : h('td', { class: 'dim' }, '—');
+      default:
+        return h('td', {}, (v === null || v === undefined) ? '' : String(v));
+    }
+  }
+
+  function renderTable() {
+    if (!rows.length) {
+      listHost.replaceChildren(h('div', { class: 'empty' }, '没有符合条件的记录'));
+      return;
+    }
+    const thead = h('thead', {}, h('tr', {}, COLUMNS.map(([key, label]) => {
+      const cls = [];
+      if (SORTABLE.has(key)) cls.push('sortable');
+      if (key === 'address') cls.push('sd-addr');   // 与 cellOf 的列宽一致
+      const th = h('th', { class: cls.join(' ') }, label);
+      if (SORTABLE.has(key)) {
+        if (sortBy === key) {
+          th.appendChild(h('span', { class: 'sd-arrow' },
+            sortDir === 'asc' ? '▲' : '▼'));
+        }
+        th.addEventListener('click', () => {
+          if (sortBy === key) sortDir = sortDir === 'desc' ? 'asc' : 'desc';
+          else { sortBy = key; sortDir = 'desc'; }
+          page = 1; loadAll();
+        });
+      }
+      return th;
+    })));
+    const tbody = h('tbody', {}, rows.map(r => {
+      const tr = h('tr', {}, COLUMNS.map(([key]) => cellOf(key, r)));
+      tr.title = r.sync_at ? `本行同步于 ${r.sync_at}` : '';
+      return tr;
+    }));
+    listHost.replaceChildren(h('table', { class: 'table table--compact sd-t' }, [thead, tbody]));
+  }
+
+  /* ================= 导出 ================= */
+  async function exportXlsx() {
+    if (!total) { toast('当前没有可导出的记录', 'warn'); return; }
+    if (total > 20000 && !await confirmDialog(
+      `当前筛选命中 <b>${escapeHtml(num(total))}</b> 行，导出的 Excel 会比较大`
+      + '（生成需要一会儿）。<br>要继续吗？',
+      { title: '导出确认' })) return;
+    download('/api/delivery/details/export?' + buildParams());
+    toast('已开始导出，请稍候…', 'success');
+  }
+
+  /* ================= 启动 ================= */
+  renderTabs();
+  renderSummary();
+  loadAll();
+  loadOptions();
+})();
+</script>
+</body>
+</html>

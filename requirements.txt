@@ -5,6 +5,8 @@
 #   fastapi / uvicorn  web 框架与服务
 #   openpyxl           Excel 导入导出（/api/export、/api/items/import）
 #   Pillow             照片证据：缩略图生成、EXIF 转正、格式校验
+#   PyMySQL            MySQL 驱动（2026-09-22 起数据层全部走 MySQL，见 core/dbapi.py）
+#   pymssql            ERP（用友 U9 / SQL Server）取数，core/erp_sync.py 与 core/erp_ship.py
 #
 # 自检守着这条：`python tools/check_deploy.py` 会扫描全仓的第三方 import
 # 与本文件比对，少任何一个都直接报错（含 --check，可进 CI）。历史上就漏过
@@ -14,3 +16,5 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 openpyxl>=3.1.0
 Pillow>=10.0.0
+PyMySQL>=1.1.0
+pymssql>=2.2.0

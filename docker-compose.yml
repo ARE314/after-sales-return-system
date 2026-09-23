@@ -11,11 +11,62 @@
 # ⚠️ 本文件在本机**未经 docker compose 实测**（这台机器没装 Docker）。
 
 services:
+  # ---------------------------------------------------------------------------
+  # 数据库：MySQL 8.0。**业务数据本体在这里**（六个 schema），
+  # data/ 卷只放照片、备份与状态文件。
+  #
+  # 用外部 MySQL（公司已有的库、云 RDS）时不启动这个服务：
+  # 把 ars / backup 的 ARS_MYSQL_HOST/PORT/USER/PASSWORD 指向它，
+  # 并保证那台库上已建好六个 schema 并给 ars 账号授了权
+  # （可照 deploy/mysql-init.sh 里的语句执行一次）。
+  # ---------------------------------------------------------------------------
+  mysql:
+    image: mysql:8.0
+    container_name: ars-mysql
+    restart: unless-stopped
+
+    # mysql_native_password 是给 PyMySQL 用的：没有 cryptography 包时它做不了
+    # caching_sha2_password 的 RSA 密钥交换（详见 deploy/mysql-init.sh 的说明）。
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-authentication-plugin=mysql_native_password
+
+    environment:
+      MYSQL_ROOT_PASSWORD: "${ARS_MYSQL_ROOT_PASSWORD:?必须在 .env 里设置 MySQL root 口令}"
+      # 这两个是给下面的初始化脚本读的（官方镜像本身不认这两个变量）
+      ARS_MYSQL_USER: "${ARS_MYSQL_USER:-ars}"
+      ARS_MYSQL_PASSWORD: "${ARS_MYSQL_PASSWORD:?必须在 .env 里设置 MySQL 应用账号口令}"
+
+    volumes:
+      # 库文件。**必须持久化**，否则容器一删业务数据全没。
+      - mysql-data:/var/lib/mysql
+      # 建六个 schema + 建 ars 账号 + 授权。**只在数据卷为空时执行一次。**
+      - ./deploy/mysql-init.sh:/docker-entrypoint-initdb.d/10-ars-init.sh:ro
+
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s        # 首次启动要初始化 datadir，给足时间
+      retries: 10
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
   ars:
     build: .
     image: ars:local
     container_name: ars
     restart: unless-stopped
+
+    # 库没就绪就不启动：应用连不上库会直接失败，早等早清楚。
+    depends_on:
+      mysql:
+        condition: service_healthy
 
     # 只在宿主本机可达；对外交给反向代理
     ports:
@@ -23,8 +74,9 @@ services:
       - "127.0.0.1:8100:8100"     # 数据接口（金山定时任务用，需令牌）
 
     volumes:
-      # 五个库 + 照片 + 备份都在这里。**必须持久化**，否则容器一删数据全没。
+      # 照片、备份、各模块的状态文件在这里。**必须持久化。**
       # 容器内路径固定为 /app/data（config.py 以项目目录为基准）。
+      # 业务数据本体不在这里 —— 在 mysql 服务的 mysql-data 卷里。
       - ./data:/app/data
 
     environment:
@@ -34,7 +86,13 @@ services:
       ARS_OPEN_API_HOST: "0.0.0.0"
       ARS_OPEN_API_PORT: "8100"
 
-      # ---- 首个管理员（仅在 auth.db 用户表为空时生效）----
+      # ---- 数据库（六个 schema 一个连接）----
+      ARS_MYSQL_HOST: "${ARS_MYSQL_HOST:-mysql}"
+      ARS_MYSQL_PORT: "${ARS_MYSQL_PORT:-3306}"
+      ARS_MYSQL_USER: "${ARS_MYSQL_USER:-ars}"
+      ARS_MYSQL_PASSWORD: "${ARS_MYSQL_PASSWORD:?必须在 .env 里设置 MySQL 应用账号口令}"
+
+      # ---- 首个管理员（仅在 auth_db 用户表为空时生效）----
       ARS_BOOTSTRAP_USER: "${ARS_BOOTSTRAP_USER:-admin}"
       ARS_BOOTSTRAP_PASSWORD: "${ARS_BOOTSTRAP_PASSWORD:?必须在 .env 里设置初始管理员密码}"
 
@@ -66,8 +124,10 @@ services:
         max-file: "5"
 
   # ---------------------------------------------------------------------------
-  # 每天定时备份。与主服务共用同一个 data 卷：备份脚本对库只做
-  # 「只读 VACUUM INTO」，服务在跑也能安全备份。
+  # 每天定时备份。与主服务共用同一个 data 卷（照片/状态文件）并连同一个 MySQL。
+  #
+  # 备份工具是 mysqldump 的一致性快照（`--single-transaction`），服务在跑也能安全备份；
+  # 出库是文本 SQL，恢复用 mysql 客户端导入，见 README 的「备份与恢复」。
   #
   # 为什么不用宿主 cron：容器化部署时宿主上不一定装了 Python；
   # 用一个一次性容器复用同一个镜像，环境与主服务完全一致。
@@ -84,6 +144,10 @@ services:
       - ./data:/app/data
     environment:
       ARS_BACKUP_KEEP: "${ARS_BACKUP_KEEP:-14}"
+      ARS_MYSQL_HOST: "${ARS_MYSQL_HOST:-mysql}"
+      ARS_MYSQL_PORT: "${ARS_MYSQL_PORT:-3306}"
+      ARS_MYSQL_USER: "${ARS_MYSQL_USER:-ars}"
+      ARS_MYSQL_PASSWORD: "${ARS_MYSQL_PASSWORD:?必须在 .env 里设置 MySQL 应用账号口令}"
     # 常驻容器内循环：启动时先跑一次，之后每 24h 一次。
     # （compose 没有内置调度器；要更精确的日历语义就用宿主的 systemd timer，
     #   见 deploy/ars-backup.timer。）
@@ -103,3 +167,8 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+
+volumes:
+  # 库文件（六个 schema）。**不要随手 docker volume rm**：业务数据全在这里，
+  # 而 ./data 卷里只有照片与备份。要清理先用 tools/backup.py 出一份全量。
+  mysql-data:

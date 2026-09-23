@@ -1164,3 +1164,39 @@ input.input--locked:read-only {
   color: var(--text-secondary); background: var(--bg-subtle);
   border: 1px solid var(--border); border-radius: var(--radius-sm);
 }
+
+/* ---------------- 权限一表全览（auth.html） ----------------
+ * 行 = 权限点、列 = 权限组。第一列与表头要粘住：表宽随组数增长，
+ * 横向滚动时看不到「这行是哪个权限点」这张表就白做了。 */
+.pmx__wrap { max-height: 620px; }
+.pmx { min-width: 720px; }
+.pmx th, .pmx td { white-space: nowrap; }
+.pmx thead th {
+  position: sticky; top: 0; z-index: 2; background: var(--bg-card, #fff);
+  text-align: center; vertical-align: bottom;
+}
+.pmx tbody th { position: sticky; left: 0; z-index: 1; }
+.pmx .pmx__pt, .pmx thead th.pmx__pt {
+  position: sticky; left: 0; z-index: 2; text-align: left;
+  background: var(--bg-card, #fff); min-width: 200px;
+}
+.pmx thead th.pmx__pt { z-index: 3; }
+.pmx .pmx__plabel { display: block; }
+.pmx .pmx__pkey {
+  display: block; font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px; color: var(--text-tertiary, #818b98);
+}
+.pmx .pmx__gname { font-weight: 600; }
+.pmx .pmx__gmeta {
+  font-size: 11px; font-weight: 400; color: var(--text-tertiary, #818b98);
+}
+.pmx .pmx__grp.is-locked { background: var(--warning-light, #fff8c5); }
+.pmx .pmx__c { text-align: center; color: var(--text-tertiary, #c3cad4); }
+.pmx .pmx__c.is-on { color: var(--success, #1a7f37); font-weight: 600; }
+.pmx tbody tr.pmx__sec th {
+  background: var(--bg-subtle, #f6f8fa); text-align: left; font-weight: 600;
+}
+.pmx tbody tr.pmx__foot td {
+  font-weight: 600; background: var(--bg-subtle, #f6f8fa);
+}
+.pmx tbody tr:hover td.pmx__c { background: var(--bg-hover, #eff2f5); }

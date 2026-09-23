@@ -63,8 +63,14 @@ def count() -> int:
         "SELECT COUNT(*) c FROM handle_db.handle_records;").fetchone()["c"]
 
 
-def upsert(detail_key: str, data: dict, operator: str = "") -> int:
-    """写入或更新一条处理记录（不存在则新建，保持稀疏）。"""
+def upsert(detail_key: str, data: dict, operator: str = "",
+           refresh_dict: bool = True) -> int:
+    """写入或更新一条处理记录（不存在则新建，保持稀疏）。
+
+    `refresh_dict=False` 供**批量导入**用：字典重建是全表扫描，逐行调用会变成
+    O(n²)（实测 3942 行要跑好几分钟）。批量场景传 False，收尾时手动调一次
+    `refresh_dict_options()` —— 它本身是幂等的重建，中间不重建不影响最终结果。
+    """
     payload = {k: v for k, v in (data or {}).items()
                if k in HANDLE_COLUMNS and k != "detail_key"}
     if not payload:
@@ -73,13 +79,13 @@ def upsert(detail_key: str, data: dict, operator: str = "") -> int:
     now = _now()
     cols = ["detail_key"] + list(payload.keys()) + ["created_at", "updated_at"]
     marks = ", ".join("?" for _ in cols)
-    updates = ", ".join(f"{k} = excluded.{k}" for k in payload)
+    updates = ", ".join(f"`{k}` = VALUES(`{k}`)" for k in payload)
     with tx() as conn:
         conn.execute(
             f"""INSERT INTO handle_db.handle_records ({', '.join(cols)})
                 VALUES ({marks})
-                ON CONFLICT(detail_key) DO UPDATE SET
-                    {updates}, updated_at = excluded.updated_at;""",
+                ON DUPLICATE KEY UPDATE
+                    {updates}, updated_at = VALUES(updated_at);""",
             [detail_key] + list(payload.values()) + [now, now],
         )
         conn.execute(
@@ -89,7 +95,8 @@ def upsert(detail_key: str, data: dict, operator: str = "") -> int:
              json.dumps(payload, ensure_ascii=False), operator, now),
         )
 
-    refresh_dict_options()
+    if refresh_dict:
+        refresh_dict_options()
     return 1
 
 
@@ -139,7 +146,7 @@ def _prune_field(conn, field: str) -> int:
                   FROM handle_db.handle_records
                   WHERE {field} IS NOT NULL AND TRIM({field}) <> ''
                   GROUP BY {field} ORDER BY n DESC LIMIT {int(DICT_OPTION_LIMIT)}
-                )
+                ) g
               );""",
         (field,),
     )
@@ -165,9 +172,9 @@ def refresh_dict_options() -> int:
                 conn.execute(
                     """INSERT INTO handle_db.dict_option (field, value, use_count, updated_at)
                        VALUES (?,?,?,?)
-                       ON CONFLICT(field, value) DO UPDATE SET
-                         use_count = excluded.use_count,
-                         updated_at = excluded.updated_at;""",
+                       ON DUPLICATE KEY UPDATE
+                         use_count = VALUES(use_count),
+                         updated_at = VALUES(updated_at);""",
                     (field, str(r["v"]).strip(), r["n"], now),
                 )
 
@@ -220,7 +227,7 @@ def distinct_values(field: str, keyword: str = "", limit: int = 300) -> list:
            f"WHERE {field} IS NOT NULL AND TRIM({field}) <> ''")
     params = []
     if keyword:
-        sql += f" AND {field} LIKE ? ESCAPE '\\'"
+        sql += f" AND {field} LIKE ? ESCAPE '\\\\'"
         params.append(f"%{_escape_like(keyword)}%")
     sql += f" GROUP BY {field} ORDER BY n DESC LIMIT ?;"
     params.append(limit)

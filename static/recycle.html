@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>回收站 · 售后返件登记系统</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260923b">
+  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260923b">
+<link rel="stylesheet" href="/static/assets/app.css?v=20260923b">
+</head>
+<body>
+<script src="/static/assets/common.js?v=20260923b"></script>
+<script>
+(async () => {
+  // 还原 / 彻底删除需要 act.recycle（默认只给管理员）。没有这个点的角色
+  // 只能看列表与详情 —— 破坏性按钮直接不渲染，别让人点了才吃 403。
+  const CAN = hasPerm('act.recycle');
+
+  const content = await mountLayout('recycle', '回收站',
+    '删除的返件明细 / 核销记录 / 匹配库物料在这里保留 7 天，可原样还原', [
+    h('button', { class: 'btn btn--sm', onclick: () => refresh() }, '刷新'),
+    ...(CAN ? [
+      h('button', { class: 'btn btn--sm', onclick: () => purgeExpired() }, '清理过期'),
+      h('button', { class: 'btn btn--sm btn--danger', onclick: () => purgeAll() }, '清空回收站'),
+    ] : []),
+  ]);
+
+  const state = {
+    kind: '', keyword: '', include_restored: 1, page: 1, page_size: 50,
+    date_from: '', date_to: '', total: 0, rows: [],
+    retention_days: 7,
+  };
+
+  function alertDialog(text, title) {
+    let m;
+    m = openModal({
+      title: title || '提示', narrow: true,
+      body: h('div', { style: { fontSize: '13px', lineHeight: '1.7' } }, text),
+      footer: [h('button', { class: 'btn', onclick: () => m.close() }, '知道了')],
+    });
+    return m;
+  }
+
+  /* ---------------- 统计卡 ---------------- */
+  const statHost = h('div', { id: 'stat-host' });
+
+  function renderStats(s) {
+    const items = [
+      ['待还原', num(s.alive), '条', s.alive ? 'kpi--warning' : ''],
+      ['已还原', num(s.restored), '条', s.restored ? 'kpi--success' : ''],
+      ['记录总数', num(s.total), '条', ''],
+      ['保留天数', num(s.retention_days), '天', 'kpi--info'],
+    ];
+    const parts = Object.values(s.by_kind || {})
+      .map(v => `${v.label} ${num(v.count)}`);
+    statHost.replaceChildren(h('div', { class: 'kpis' },
+      items.map(([label, value, unit, cls]) => h('div', { class: `kpi ${cls}` }, [
+        h('div', { class: 'kpi__label' }, label),
+        h('div', { class: 'kpi__value' }, [value, h('span', { class: 'kpi__unit' }, unit)]),
+      ]))), parts.length
+      ? h('div', { class: 'small muted mt8' }, '构成：' + parts.join(' · '))
+      : null);
+  }
+
+  async function loadStats() {
+    try {
+      const s = await api('/recycle/stats');
+      state.retention_days = s.retention_days || state.retention_days;
+      renderStats(s);
+    } catch (e) {
+      statHost.replaceChildren(h('div', { class: 'empty' }, '统计加载失败：' + e.message));
+    }
+  }
+
+  /* ---------------- 筛选 ---------------- */
+  const KIND_OPTS = [['', '全部类别'], ['return', '返件明细'],
+    ['clear', '核销记录'], ['item', '匹配库物料']];
+  const kindSel = h('select', { class: 'select select--sm', style: { width: '150px' } },
+    KIND_OPTS.map(([v, label]) => h('option', { value: v }, label)));
+
+  const kwInput = h('input', {
+    class: 'input', style: { width: '260px' },
+    placeholder: '搜索单号 / 标签 / 说明 / 删除人…',
+  });
+  let kwTimer = null;
+  kwInput.addEventListener('input', () => {
+    clearTimeout(kwTimer);
+    kwTimer = setTimeout(() => { state.keyword = kwInput.value.trim(); load(1); }, 300);
+  });
+  kwInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      clearTimeout(kwTimer); state.keyword = kwInput.value.trim(); load(1);
+    }
+  });
+
+  const incChk = h('input', { type: 'checkbox' });
+  incChk.checked = true;
+  incChk.addEventListener('change', () => {
+    state.include_restored = incChk.checked ? 1 : 0;
+    load(1);
+  });
+
+  const fromInput = h('input', { class: 'input', type: 'date',
+    style: { width: '150px' }, title: '删除时间起' });
+  const toInput = h('input', { class: 'input', type: 'date',
+    style: { width: '150px' }, title: '删除时间止' });
+  fromInput.addEventListener('change', () => { state.date_from = fromInput.value; load(1); });
+  toInput.addEventListener('change', () => { state.date_to = toInput.value; load(1); });
+
+  kindSel.addEventListener('change', () => { state.kind = kindSel.value; load(1); });
+
+  const filterCard = h('div', { class: 'card mb12 mt12' },
+    h('div', { class: 'card__body' }, [
+      h('div', { class: 'flex flex-wrap', style: { gap: '8px' } }, [
+        kindSel, kwInput, fromInput, h('span', { class: 'small muted',
+          style: { alignSelf: 'center' } }, '至'), toInput,
+        h('label', { class: 'small', style: { display: 'flex',
+          alignItems: 'center', gap: '6px' } }, [incChk, '包含已还原']),
+        h('button', {
+          class: 'btn btn--sm btn--ghost',
+          onclick: () => {
+            state.kind = ''; state.keyword = ''; state.include_restored = 1;
+            state.date_from = ''; state.date_to = '';
+            kindSel.value = ''; kwInput.value = ''; incChk.checked = true;
+            fromInput.value = ''; toInput.value = '';
+            load(1);
+          },
+        }, '重置'),
+      ]),
+      h('div', { class: 'small muted mt8' },
+        '过期条目由后台自动清理；「清理过期」可立即清一次，「彻底删除」不可恢复。'),
+    ]));
+
+  /* ---------------- 表格 ---------------- */
+  const KIND_TAG = { return: 'info', clear: 'brand', item: 'warning' };
+  const tableHost = h('div', { class: 'table-wrap',
+    style: { maxHeight: 'calc(100vh - 470px)' } });
+  const pagerHost = h('div', { class: 'pager' });
+  const summary = h('div', { class: 'card__hint' });
+
+  const tableCard = h('div', { class: 'card' }, [
+    h('div', { class: 'card__head' }, [
+      h('div', { class: 'card__title' }, '回收站记录'),
+      summary,
+      h('div', { class: 'card__tools' },
+        h('button', { class: 'btn btn--sm btn--ghost',
+          onclick: () => refresh() }, '刷新')),
+    ]),
+    tableHost,
+    pagerHost,
+  ]);
+
+  content.replaceChildren(statHost, filterCard, tableCard);
+
+  /* ---------------- 数据加载 ---------------- */
+  function refresh() {
+    loadStats();
+    load(state.page);
+  }
+
+  async function load(page = 1) {
+    state.page = page;
+    tableHost.replaceChildren(h('div', { class: 'empty' }, '加载中…'));
+    try {
+      const res = await api('/recycle?' + qs({
+        kind: state.kind, keyword: state.keyword, page: state.page,
+        page_size: state.page_size, include_restored: state.include_restored,
+        date_from: state.date_from, date_to: state.date_to,
+      }));
+      state.rows = res.rows; state.total = res.total;
+      state.retention_days = res.retention_days || state.retention_days;
+      renderTable(res);
+      renderPager(res);
+      summary.textContent = `共 ${num(res.total)} 条 · 第 ${res.page}/${Math.max(1, res.pages)} 页`
+        + ` · 保留 ${num(state.retention_days)} 天`;
+    } catch (e) {
+      tableHost.replaceChildren(h('div', { class: 'empty' }, '加载失败：' + e.message));
+    }
+  }
+
+  function renderTable(res) {
+    if (!res.rows.length) {
+      tableHost.replaceChildren(h('div', { class: 'empty' }, [
+        h('div', { class: 'empty__icon' }, '○'),
+        state.keyword || state.kind
+          ? '没有符合条件的回收站记录'
+          : '回收站是空的 —— 删除明细 / 核销记录 / 物料后会先落到这里',
+      ]));
+      return;
+    }
+    const thead = h('thead', {}, h('tr', {}, [
+      h('th', { style: { width: '96px' } }, '类别'),
+      h('th', { style: { width: '190px' } }, '单号 / 标签'),
+      h('th', {}, '说明'),
+      h('th', { style: { width: '66px', textAlign: 'right' } }, '行数'),
+      h('th', { style: { width: '96px' } }, '删除人'),
+      h('th', { style: { width: '150px' } }, '删除时间'),
+      h('th', { style: { width: '84px' } }, '剩余'),
+      h('th', { style: { width: '104px' } }, '状态'),
+      h('th', { style: { width: '128px', textAlign: 'center' } }, '操作'),
+    ]));
+
+    const tbody = h('tbody', {}, res.rows.map(r => {
+      const left = r.restored ? '—'
+        : (r.expired ? h('span', { class: 'tag tag--danger' }, '已过期')
+          : `${num(r.days_left)} 天`);
+      const acts = [h('button', { class: 'row-btn', title: '查看快照详情',
+        onclick: () => openDetail(r) }, '详情')];
+      if (CAN && !r.restored) {
+        acts.push(h('button', { class: 'row-btn', title: '还原到业务表',
+          onclick: () => doRestore(r) }, '↺'));
+        acts.push(h('button', { class: 'row-btn row-btn--danger',
+          title: '彻底删除（不可恢复）', onclick: () => purgeOne(r) }, '×'));
+      }
+      return h('tr', {}, [
+        h('td', {}, h('span', { class: `tag tag--${KIND_TAG[r.kind] || 'info'}` },
+          r.kind_label || r.kind)),
+        h('td', { class: 'mono', style: { fontWeight: '500' },
+          title: r.ref_key || '' }, r.ref_label || r.ref_key || '—'),
+        h('td', { class: 'cell-wrap', title: r.summary || '' }, r.summary || ''),
+        h('td', { class: 'mono', style: { textAlign: 'right' } }, num(r.row_count)),
+        h('td', {}, r.operator || '—'),
+        h('td', { class: 'mono small' }, r.created_at || ''),
+        h('td', {}, left),
+        h('td', {}, r.restored
+          ? h('span', { class: 'tag tag--success',
+            title: `还原：${r.restored_at || ''} · ${r.restored_by || ''}` }, '已还原')
+          : h('span', { class: 'tag tag--warning' }, '待还原')),
+        h('td', {}, h('div', { class: 'row-actions' }, acts)),
+      ]);
+    }));
+
+    tableHost.replaceChildren(h('table', { class: 'table' }, [thead, tbody]));
+  }
+
+  function renderPager(res) {
+    const sizes = [20, 50, 100, 200];
+    const sizeSel = h('select', { class: 'select select--sm', style: { width: '92px' } },
+      sizes.map(s => h('option', { value: s,
+        selected: s === state.page_size ? 'selected' : null }, `${s} 条/页`)));
+    sizeSel.addEventListener('change', () => {
+      state.page_size = Number(sizeSel.value); load(1);
+    });
+
+    const btn = (text, p, disabled) => h('button', {
+      class: 'btn btn--sm', disabled: disabled ? 'disabled' : null,
+      onclick: () => load(p),
+    }, text);
+
+    pagerHost.replaceChildren(
+      h('span', {}, `共 ${num(res.total)} 条，${Math.max(1, res.pages)} 页`),
+      h('div', { class: 'pager__spacer' }),
+      sizeSel,
+      btn('首页', 1, res.page <= 1),
+      btn('上一页', res.page - 1, res.page <= 1),
+      h('span', { class: 'mono', style: { padding: '0 4px' } },
+        `${res.page} / ${Math.max(1, res.pages)}`),
+      btn('下一页', res.page + 1, res.page >= res.pages),
+      btn('末页', res.pages, res.page >= res.pages),
+    );
+  }
+
+  /* ---------------- 详情 ---------------- */
+  async function openDetail(r) {
+    let d;
+    try {
+      d = await api('/recycle/' + r.id);
+    } catch (e) {
+      toast('读取详情失败：' + e.message, 'error');
+      return;
+    }
+    const kv = (k, v) => h('div', { class: 'field', style: { marginBottom: '0' } }, [
+      h('label', { class: 'field__label' }, k),
+      h('div', { class: 'mono' }, v === null || v === undefined || v === '' ? '—' : String(v)),
+    ]);
+    const tblRows = (d.tables || []).map(t => h('tr', {}, [
+      h('td', { class: 'mono' }, `${t.schema}.${t.table}`),
+      h('td', {}, `${num(t.count)} 行`),
+      h('td', { class: 'mono small cell-wrap' }, (t.columns || []).join(', ')),
+    ]));
+    const body = h('div', {}, [
+      h('div', { class: 'grid grid--3' }, [
+        kv('类别', d.kind_label), kv('单号 / 标签', d.ref_label),
+        kv('业务主键', d.ref_key),
+        kv('删除人', d.operator), kv('删除时间', d.created_at),
+        kv('到期时间', d.expires_at),
+        kv('快照行数', num(d.row_count)), kv('照片', num(d.photos)),
+        kv('快照大小', `${num(Math.round((d.payload_size || 0) / 1024))} KB`),
+      ]),
+      d.summary ? h('div', { class: 'small muted mt8' }, d.summary) : null,
+      d.restored ? h('div', { class: 'small muted mt8' },
+        `已于 ${d.restored_at || ''} 由 ${d.restored_by || ''} 还原`) : null,
+      h('div', { class: 'card__title mt12' }, '快照内容'),
+      h('div', { class: 'table-wrap' }, h('table', { class: 'table' }, [
+        h('thead', {}, h('tr', {}, [
+          h('th', { style: { width: '220px' } }, '表'),
+          h('th', { style: { width: '80px' } }, '行数'),
+          h('th', {}, '字段'),
+        ])),
+        h('tbody', {}, tblRows),
+      ])),
+      h('div', { class: 'small muted mt8' },
+        '还原会把上面这些行原样写回业务表（含主键与照片）；目标表已有同键记录时整条拒绝。'),
+    ]);
+
+    const foot = [h('button', { class: 'btn', onclick: () => m.close() }, '关闭')];
+    if (CAN && !d.restored) {
+      foot.push(h('button', { class: 'btn btn--danger',
+        onclick: () => { m.close(); purgeOne(d); } }, '彻底删除'));
+      foot.push(h('button', { class: 'btn btn--primary',
+        onclick: () => { m.close(); doRestore(d); } }, '还原'));
+    }
+    const m = openModal({ title: `回收站 #${d.id}`, body, footer: foot, wide: true });
+  }
+
+  /* ---------------- 还原 ---------------- */
+  async function doRestore(r) {
+    const ok = await confirmDialog(
+      `确定还原 <b class="mono">${escapeHtml(r.ref_label || r.ref_key || ('#' + r.id))}</b> 吗？<br>`
+      + '删除那一刻的数据会原样写回业务表，照片一并搬回。',
+      { title: '还原' });
+    if (!ok) return;
+    try {
+      const res = await api('/recycle/' + r.id + '/restore', { method: 'POST' });
+      const parts = Object.entries(res.restored || {}).map(([k, v]) => `${k} ${v} 行`);
+      toast(`已还原：${parts.join(' · ') || '完成'}`, 'success', 3600);
+      refresh();
+    } catch (e) {
+      // 冲突（同键记录已存在）是最常见的失败 —— 把服务端原话完整给出来，
+      // 别让用户只看到一个「还原失败」。
+      alertDialog(e.message, '还原失败');
+    }
+  }
+
+  /* ---------------- 彻底删除 ---------------- */
+  async function purgeOne(r) {
+    const ok = await confirmDialog(
+      `彻底删除 <b class="mono">${escapeHtml(r.ref_label || r.ref_key || ('#' + r.id))}</b> 这条记录吗？<br>`
+      + '<b>记录与照片都会被真删，之后无法还原。</b>',
+      { title: '彻底删除', danger: true });
+    if (!ok) return;
+    try {
+      await api('/recycle/' + r.id, { method: 'DELETE' });
+      toast('已彻底删除', 'success');
+      refresh();
+    } catch (e) {
+      toast('删除失败：' + e.message, 'error');
+    }
+  }
+
+  async function purgeExpired() {
+    const ok = await confirmDialog(
+      `清理掉已超过 ${escapeHtml(num(state.retention_days))} 天保留期的记录吗？<br>`
+      + '这些记录已经过期，清理后无法还原。', { title: '清理过期', danger: true });
+    if (!ok) return;
+    try {
+      const res = await api('/recycle/purge', { method: 'POST', body: { expired: true } });
+      toast(res.deleted ? `已清理 ${num(res.deleted)} 条过期记录` : '没有过期记录需要清理',
+        'success');
+      refresh();
+    } catch (e) {
+      toast('清理失败：' + e.message, 'error');
+    }
+  }
+
+  async function purgeAll() {
+    const ok = await confirmDialog(
+      `清空回收站里的全部 <b>${escapeHtml(num(state.total))}</b> 条记录吗？<br>`
+      + '<b>记录与照片都会被真删，之后无法还原</b>（明细、核销记录、物料都在内）。',
+      { title: '清空回收站', danger: true });
+    if (!ok) return;
+    try {
+      const res = await api('/recycle/purge', { method: 'POST', body: { all: true } });
+      toast(`已清空回收站（${num(res.deleted)} 条）`, 'success');
+      refresh();
+    } catch (e) {
+      toast('清空失败：' + e.message, 'error');
+    }
+  }
+
+  refresh();
+})();
+</script>
+</body>
+</html>

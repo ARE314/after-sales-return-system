@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>处理登记 · 售后返件登记系统</title>
   <link rel="icon" href="/favicon.ico" sizes="any">
-  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260920p">
-  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260920p">
-<link rel="stylesheet" href="/static/assets/app.css?v=20260920p">
+  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260923b">
+  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260923b">
+<link rel="stylesheet" href="/static/assets/app.css?v=20260923b">
 </head>
 <body>
-<script src="/static/assets/common.js?v=20260920p"></script>
+<script src="/static/assets/common.js?v=20260923b"></script>
 <script>
 (async () => {
   const pendingTag = h('span', { class: 'tag' }, '待处理 —');
@@ -294,9 +294,16 @@
       const active = currentOrder && currentOrder.order_no === r.order_no;
       const place = [r.turbine_vendor || '—'];
       if (r.project_site) place.push(h('span', { class: 'muted' }, ' / ' + r.project_site));
+      // ⚠️ 判的字段要和显示的字段一致（2026-09-22 修）：原来拿「未检测数」
+      // 当条件、却显示「未处理数」—— 一单「每行都已处理、只是有行没检测」
+      // 时会显示「· 0 未处理」，看着像个 bug。
+      // 两个数分开显示、各判各的。
       const progress = [`${r.lines} 行`];
-      if (r.untested) {
+      if (r.unhandled) {
         progress.push(h('span', { class: 'muted' }, ` · ${r.unhandled} 未处理`));
+      }
+      if (r.untested) {
+        progress.push(h('span', { class: 'muted' }, ` · ${r.untested} 未检测`));
       }
       return h('tr', {
         class: active ? 'is-active' : '',

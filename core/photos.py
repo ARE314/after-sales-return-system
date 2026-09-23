@@ -25,7 +25,7 @@ from pathlib import Path
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from config import (PHOTO_DIR, PHOTO_EXTS, PHOTO_MAX_MB, PHOTO_THUMB_QUALITY,
-                    PHOTO_THUMB_SIZE)
+                    PHOTO_THUMB_SIZE, PHOTO_TRASH_DIR)
 
 THUMB_SUFFIX = ".thumb.jpg"
 
@@ -307,3 +307,117 @@ def count_files(detail_key: str) -> int:
         return 0
     return sum(1 for p in directory.iterdir()
                if p.is_file() and p.name.startswith(prefix))
+
+
+# ---------------------------------------------------------------------------
+# 回收站：搬走 / 搬回 / 真删
+# ---------------------------------------------------------------------------
+# 删除明细时**不能直接 unlink** —— 照片删除不可逆，而记录本身是能从回收站
+# 还原的。所以照片改为「搬进 data/photos_trash/<回收站 id>/<售后单号>/」，
+# 记录还原时搬回原位，彻底删除时才真删。同盘 rename，不做文件复制。
+
+def _trash_dir(item_id) -> Path:
+    return PHOTO_TRASH_DIR / str(int(item_id))
+
+
+def _drop_empty(path: Path) -> None:
+    """目录空了就删掉；删不掉（非空 / 被占用）不算错误。"""
+    try:
+        if path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
+    except OSError:
+        pass
+
+
+def move_to_trash(detail_key: str, item_id) -> list:
+    """把该明细的照片文件搬进回收站目录，返回搬走清单。
+
+    清单形如 `[{"order_no": "20260057", "name": "20260057-002-1.jpg"}, …]`，
+    写进回收站记录的 payload，还原时照着搬回来。
+    搬不动的（被占用 / 受环境策略拦截）**留在原处**：文件还在，
+    还原时本来就无需搬回，所以只跳过、不报错。
+    """
+    prefix = f"{_clean(detail_key)}-"
+    order_no = _clean(order_no_of(detail_key))
+    directory = PHOTO_DIR / order_no
+    if not directory.is_dir():
+        return []
+    dest_dir = _trash_dir(item_id) / order_no
+    moved = []
+    for p in list(directory.iterdir()):
+        if not (p.is_file() and p.name.startswith(prefix)):
+            continue
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            target = dest_dir / p.name
+            if target.exists():
+                target.unlink()
+            p.rename(target)
+            moved.append({"order_no": order_no, "name": p.name})
+        except OSError:
+            continue
+    _drop_empty(directory)
+    return moved
+
+
+def restore_from_trash(item_id, entries) -> int:
+    """把回收站里该记录的照片搬回原位，返回搬回的文件数。
+
+    `entries` 为空时（删除时搬运失败 / 老记录没写清单）退化为**按目录结构
+    全部搬回** —— 暂存目录里的相对路径就是 `<售后单号>/<文件名>`，
+    信息没丢，所以照样能还原。
+    """
+    base = _trash_dir(item_id)
+    if not base.is_dir():
+        return 0
+    pairs = []
+    if entries:
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            order_no = _clean(e.get("order_no"))
+            name = _clean(e.get("name"))
+            if name:
+                pairs.append((order_no, name))
+    else:
+        for p in sorted(base.rglob("*")):
+            if p.is_file():
+                rel = p.relative_to(base)
+                parts = rel.parts
+                pairs.append((parts[0] if len(parts) > 1 else "", rel.name))
+    moved = 0
+    for order_no, name in pairs:
+        src = base / order_no / name
+        if not src.is_file():
+            continue
+        try:
+            dest = (PHOTO_DIR / order_no) if order_no else PHOTO_DIR
+            dest.mkdir(parents=True, exist_ok=True)
+            target = dest / name
+            if target.exists():
+                target.unlink()
+            src.rename(target)
+            moved += 1
+        except OSError:
+            continue
+    _drop_empty(base)
+    return moved
+
+
+def purge_trash(item_id) -> int:
+    """彻底删除该记录在回收站里的照片文件（不可恢复），返回删除的文件数。"""
+    base = _trash_dir(item_id)
+    if not base.is_dir():
+        return 0
+    removed = 0
+    for p in sorted(base.rglob("*"), reverse=True):
+        try:
+            if p.is_file():
+                p.unlink()
+                removed += 1
+            elif p.is_dir():
+                p.rmdir()
+        except OSError:
+            continue
+    _drop_empty(base)
+    return removed

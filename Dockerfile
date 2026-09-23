@@ -17,8 +17,14 @@ FROM python:3.12-slim
 # Pillow 在 slim 镜像里通常有 manylinux wheel，但一旦没有 wheel 就会退回源码编译，
 # 那时缺 libjpeg/zlib 会以一堆链接错误失败、报错完全不指向根因。
 # 这两个是运行时/构建期都可能用到的，装上很便宜。
+#
+# default-mysql-client 提供 mysql 与 mysqldump：**备份服务要用**（tools/backup.py
+# 走 mysqldump 出库、tools/check_backup.py 走 mysql 导入影子库）。少了它，
+# 主服务照常跑，备份会在运行时才报「找不到 mysqldump」。
+# pymssql（ERP 取数）在 cp312 上有 manylinux wheel；万一没有 wheel 会退回源码编译，
+# 那时需要 freetds-dev。取数用不了不影响主服务启动（core/erp_sync.py 是惰性导入）。
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libjpeg62-turbo zlib1g \
+ && apt-get install -y --no-install-recommends libjpeg62-turbo zlib1g default-mysql-client \
  && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONUNBUFFERED=1 \
@@ -35,7 +41,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # 非 root 运行：容器内被攻破也不该是 root。
-# data/ 需要可写（五个库 + 照片 + 备份都在这里），所以先建好并授权。
+# data/ 需要可写（照片 + 备份 + 各模块状态文件都在这里），所以先建好并授权。
+# 业务数据本体不在这里 —— 在 MySQL 里（compose 的 mysql 服务 / 外部库）。
 RUN useradd --create-home --shell /usr/sbin/nologin ars \
  && mkdir -p /app/data \
  && chown -R ars:ars /app

@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>自动同步任务 · 售后返件登记系统</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260923b">
+  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260923b">
+<link rel="stylesheet" href="/static/assets/app.css?v=20260923b">
+</head>
+<body>
+<script src="/static/assets/common.js?v=20260923b"></script>
+<script>
+(async () => {
+  const content = await mountLayout('sync-tasks', '自动同步任务',
+    '两个 ERP 数据源（匹配数据库 / 发货明细）的自动同步进度与结果。'
+    + '后台节拍器**每分钟**醒一次、按「上次同步时间 + 间隔」判断是否到点，'
+    + '到点自己跑 —— 不需要人盯着',
+    [h('button', { class: 'btn btn--sm', onclick: () => refreshAll(true) }, '刷新')]);
+
+  const itemsHost = h('div', {});
+  const shipHost = h('div', {});
+  const connHost = h('div', {});
+  content.replaceChildren(itemsHost, shipHost, connHost);
+
+  /* 两个任务的写操作权限是不同的点：
+       · 匹配库（含连接配置）—— act.items_sync，默认只给管理员（整表覆盖）
+       · 发货明细「立即同步」—— act.delivery_detail（常规增量，登记员也有）
+       · 发货明细「全量同步」—— act.delivery_detail_full（整表覆盖，只给管理员）
+     没有对应权限的人**看不到按钮**（点了必然 403，看起来像坏了）。 */
+  const CAN_ITEMS = hasPerm('act.items_sync');
+  const CAN_SHIP = hasPerm('act.delivery_detail');
+  const CAN_SHIP_FULL = hasPerm('act.delivery_detail_full');
+
+  /* ================= 共用小工具 ================= */
+  function infoBox(label, value, mono) {
+    return h('div', { class: 'kpi' }, [
+      h('div', { class: 'kpi__label' }, label),
+      h('div', { class: mono ? 'kpi__value mono small' : 'kpi__value' },
+        value === undefined || value === null || value === '' ? '—' : String(value)),
+    ]);
+  }
+
+  /** 统一的状态标签。**运行中优先** —— 一次同步跑了十几秒，
+      「运行中」比「上次正常」更该被看见。 */
+  function statusTag(s) {
+    if (!s || !s.configured) {
+      return h('span', { class: 'tag tag--danger' }, '未配置');
+    }
+    if (s.running) return h('span', { class: 'tag tag--warning' }, '运行中…');
+    if (s.ok === false) return h('span', { class: 'tag tag--danger' }, '最近一次失败');
+    if (s.stale) return h('span', { class: 'tag tag--warning' }, '已超期');
+    return h('span', { class: 'tag tag--success' }, '正常');
+  }
+
+  /** 自动同步开关。⚠️ 绑 `s.enabled`（有没有启用），**不是 `s.running`**
+      （此刻有没有在跑）。匹配数据库那边这里错绑过 running，而 running 绝大多数
+      时候是 false —— 开关永远显示「关」，用户点一下打开、下次刷新又弹回去，
+      于是得出结论「自动同步不生效」。 */
+  function autoSwitch(s, onchange, label) {
+    const el = h('input', { type: 'checkbox' });
+    el.checked = !!s.enabled;
+    el.addEventListener('change', () => onchange(el, el.checked));
+    return h('label', { class: 'switch' }, [
+      el, h('span', { class: 'switch__track' }),
+      h('span', { class: 'switch__label' }, label),
+    ]);
+  }
+
+  /** 「立即同步 / 全量同步」共用的「启动 + 轮询到结束」。
+      两个任务都是后台跑（匹配库 8 秒、发货明细全量十几秒），
+      轮询状态直到 running 变回 false。 */
+  function pollUntilDone(S, loadFn, limit) {
+    let n = 0;
+    clearInterval(S.timer);
+    S.timer = setInterval(async () => {
+      n += 1;
+      await loadFn(false);
+      const s = S.status || {};
+      // 上限（拍数 × 1.5s）：匹配库 60 拍、发货明细 120 拍。超了就当它结束 ——
+      // 否则定时器会一直转下去，页面看起来永远在「同步中」。
+      if (!s.running || n > limit) {
+        clearInterval(S.timer);
+        S.timer = null;
+        toast(s.ok === false ? ('同步失败：' + (s.error || '')) : '同步完成',
+              s.ok === false ? 'error' : 'success');
+      }
+    }, 1500);
+  }
+
+  async function startRun(S, url, msg, loadFn, limit) {
+    try {
+      const r = await api(url, { method: 'POST', body: {} });
+      if (!r.ok) { toast(r.error || '未能启动同步', 'error'); return; }
+      toast(msg, 'success');
+    } catch (e) { toast(apiErr(e), 'error'); return; }
+    pollUntilDone(S, loadFn, limit || 60);
+  }
+
+  /* ================= 任务 1：匹配数据库（物料主档） ================= */
+  const S1 = { status: null, timer: null };
+
+  async function load1(showToast) {
+    try {
+      S1.status = await api('/items/sync/status');
+    } catch (e) {
+      itemsHost.replaceChildren(h('div', { class: 'card mb16' },
+        h('div', { class: 'card__body' },
+          h('div', { class: 'hint-danger' },
+            '读取「匹配数据库」同步状态失败：' + apiErr(e)))));
+      return;
+    }
+    if (showToast) toast('已刷新', 'success');
+    render1();
+  }
+
+  function render1() {
+    const s = S1.status || {};
+    const bad = s.ok === false || !s.configured || s.stale;
+
+    const body = h('div', { class: 'card__body' }, [
+      h('div', { class: 'grid grid--5' }, [
+        infoBox('最近一次同步', s.at || '（无记录）'),
+        infoBox('距今', (s.age_hours === null || s.age_hours === undefined)
+          ? '—' : `${s.age_hours} 小时`),
+        infoBox('同步间隔', `${s.interval_hours || 12} 小时`),
+        /* 「下次自动同步」这一格不能省：只有「最近一次」时，用户分不清
+           「没启用」和「启用了但还没到点」，只能反复点「立即同步」确认它还活着。 */
+        infoBox('下次自动同步', s.enabled ? (s.next_at || '—') : '未启用'),
+        infoBox('本地记录', num(s.total_local) + ' 条'),
+      ]),
+      h('div', { class: bad ? 'hint-danger' : 'hint-info',
+                 style: { marginTop: '12px' } }, s.note || ''),
+      s.error ? h('div', { class: 'hint-danger', style: { marginTop: '8px' } },
+        '错误：' + s.error) : null,
+      /* ★ 缺列权限是**必须显眼**的一种失败：同步没成功、匹配库还停在旧数据上，
+         而错误里的列名正是「要去申请哪一列权限」的答案。 */
+      (s.missing_cols && s.missing_cols.length)
+        ? h('div', { class: 'hint-danger', style: { marginTop: '8px' } },
+            'ERP 列权限不足，读不到：' + s.missing_cols.join('、')
+            + '（匹配库未被改动）') : null,
+      h('div', { class: 'divider' }),
+      /* 状态卡**不显示** ERP 连接信息（地址 / 端口 / 库名 / 账号 / 密码）：
+         这张卡只回答「同步有没有在跑、数据新不新」，铺出内网连接串既无助于
+         判断，又是页面上最容易被截图带走的信息。连接串只在「连接配置」弹窗里。 */
+      h('div', { class: 'small muted' },
+        '写入范围：' + (s.scope && s.scope.synced ? s.scope.synced.join(' · ') : '—')),
+      h('div', { class: 'small muted' }, s.scope ? (s.scope.why || '') : ''),
+      (s.named || s.described) ? h('div', { class: 'small muted' },
+        `上次同步补上：品名 ${num(s.named)} · 描述 ${num(s.described)}`
+        + ` · 类别 ${num(s.category_mapped)}`) : null,
+      h('div', { class: 'divider' }),
+      h('div', { class: 'flex flex-wrap',
+                 style: { gap: '12px', alignItems: 'center' } }, [
+        CAN_ITEMS ? h('button', {
+          class: 'btn btn--sm btn--primary',
+          disabled: !!s.running,
+          onclick: () => startRun(S1, '/items/sync/run',
+            '同步已开始，正在拉取 ERP…', load1, 60),
+        }, s.running ? '同步进行中…' : '立即同步') : null,
+        CAN_ITEMS ? autoSwitch(s, toggleAuto1,
+          `自动同步（每 ${s.interval_hours || 12} 小时）`) : null,
+        CAN_ITEMS ? h('button', {
+          class: 'btn btn--sm btn--ghost',
+          onclick: () => openConnConfig('items'),
+        }, '连接配置') : null,
+        CAN_ITEMS ? null : h('span', { class: 'small muted' },
+          '同步与连接配置只有管理员能操作（整表覆盖：ERP 里没有的料号本地删除）'),
+      ]),
+    ]);
+
+    itemsHost.replaceChildren(h('div', { class: 'card mb16' }, [
+      h('div', { class: 'card__head' }, [
+        h('div', {}, [
+          h('div', { class: 'card__title' }, '匹配数据库 · 物料主档'),
+          h('div', { class: 'card__hint' },
+            '退回登记按料号回填的第一优先来源；整表覆盖写入'),
+        ]),
+        h('div', { class: 'card__tools' }, [
+          statusTag(s),
+          h('button', { class: 'btn btn--sm btn--ghost',
+                        onclick: () => load1(true) }, '刷新状态'),
+        ]),
+      ]),
+      body,
+    ]));
+  }
+
+  /* 写自动同步开关。失败时必须把开关**翻回去** —— 否则界面显示的是一件
+     并没有发生的事，用户下次来看到的状态就是错的。 */
+  async function toggleAuto1(el, on) {
+    try {
+      await api('/items/sync/config',
+        { method: 'PUT', body: { enabled: on ? '1' : '0' } });
+      toast(on ? '已启用自动同步' : '已关闭自动同步', 'success');
+    } catch (e) {
+      toast(apiErr(e), 'error');
+      el.checked = !on;
+    }
+    await load1(false);                   // 用服务端真实状态回填，不只改本地
+  }
+
+  /* ================= 任务 2：发货明细（ERP 出货单） ================= */
+  const S2 = { status: null, timer: null };
+
+  async function load2(showToast) {
+    try {
+      S2.status = await api('/delivery/details/sync/status');
+    } catch (e) {
+      shipHost.replaceChildren(h('div', { class: 'card mb16' },
+        h('div', { class: 'card__body' },
+          h('div', { class: 'hint-danger' },
+            '读取「发货明细」同步状态失败：' + apiErr(e)))));
+      return;
+    }
+    if (showToast) toast('已刷新', 'success');
+    render2();
+  }
+
+  function render2() {
+    const s = S2.status || {};
+    const bad = s.ok === false || !s.configured || s.stale;
+    /* 「上次同步模式」：两条路耗时差一个数量级（增量 0.5 秒 vs 全量十几秒），
+       不标出来的话「这次怎么这么快」会被当成没同步成功。 */
+    const modeTxt = s.full === true ? '全量同步（整表覆盖）'
+      : (s.full === false ? '常规同步（增量）' : '—');
+
+    const body = h('div', { class: 'card__body' }, [
+      h('div', { class: 'grid grid--5' }, [
+        infoBox('最近一次同步', s.at || '（无记录）'),
+        infoBox('距今', (s.age_hours === null || s.age_hours === undefined)
+          ? '—' : `${s.age_hours} 小时`),
+        infoBox('数据区间', s.rows
+          ? `${s.first_date || '—'} ~ ${s.last_date || '—'}` : '—'),
+        infoBox('下次自动同步', s.enabled ? (s.next_at || '—') : '未启用'),
+        infoBox('本地记录', num(s.rows) + ' 条'),
+      ]),
+      h('div', { class: bad ? 'hint-danger' : 'hint-info',
+                 style: { marginTop: '12px' } }, s.note || ''),
+      s.error ? h('div', { class: 'hint-danger', style: { marginTop: '8px' } },
+        '错误：' + s.error) : null,
+      h('div', { class: 'divider' }),
+      h('div', { class: 'small muted' },
+        `上次同步模式：${modeTxt} · 覆盖区间 `
+        + `${(s.date_from || s.date_to)
+              ? `${s.date_from || '不限'} ~ ${s.date_to || '不限'}` : '全部'}`),
+      h('div', { class: 'small muted' },
+        `超过 ${s.stale_hours} 小时未同步会在上方提示。`
+        + '「立即同步」＝常规同步，只刷近 2 天与本地未核准的单；'
+        + '「全量同步」＝整表覆盖，只有管理员能点。'),
+      s.fetched ? h('div', { class: 'small muted' },
+        `上次取数 ${num(s.fetched)} 行 · 替换 ${num(s.deleted)} → `
+        + `${num(s.inserted)} 行 · ${num(s.elapsed_ms)} ms`) : null,
+      h('div', { class: 'divider' }),
+      h('div', { class: 'flex flex-wrap',
+                 style: { gap: '12px', alignItems: 'center' } }, [
+        CAN_SHIP ? h('button', {
+          class: 'btn btn--sm btn--primary',
+          disabled: !!s.running,
+          onclick: () => startRun(S2, '/delivery/details/sync',
+            '同步已开始，正在拉取 ERP…', load2, 120),
+        }, s.running ? '同步进行中…' : '立即同步') : null,
+        /* 破坏性按钮只给管理员（后端 PERM_RULES 也拦一道）：它会把整张
+           ship_detail 清空再写回。 */
+        (CAN_SHIP && CAN_SHIP_FULL) ? h('button', {
+          class: 'btn btn--sm btn--danger', onclick: runFullSync,
+          title: '整表覆盖：先清空本地发货明细，再从 ERP 全部写回',
+        }, s.running ? '同步进行中…' : '全量同步') : null,
+        CAN_SHIP ? autoSwitch(s, toggleAuto2,
+          `自动同步（每 ${s.interval_hours || 8} 小时）`) : null,
+        CAN_SHIP ? h('button', {
+          class: 'btn btn--sm btn--ghost',
+          onclick: () => openConnConfig('ship'),
+        }, '连接配置') : null,
+      ]),
+    ]);
+
+    shipHost.replaceChildren(h('div', { class: 'card mb16' }, [
+      h('div', { class: 'card__head' }, [
+        h('div', {}, [
+          h('div', { class: 'card__title' }, '发货明细 · ERP 出货单'),
+          h('div', { class: 'card__hint' },
+            'U9 出货单的本地镜像；常规同步只刷近 2 天与未核准的单'),
+        ]),
+        h('div', { class: 'card__tools' }, [
+          statusTag(s),
+          h('button', { class: 'btn btn--sm btn--ghost',
+                        onclick: () => load2(true) }, '刷新状态'),
+        ]),
+      ]),
+      body,
+    ]));
+  }
+
+  /* 「全量同步」＝整表覆盖（管理员）。先确认再动手：它会先清空整张表，
+     过程中页面上的明细会短暂不完整 —— 这条必须让用户知情。 */
+  async function runFullSync() {
+    const s = S2.status || {};
+    const ok = await confirmDialog(
+      '「全量同步」会<b>先清空本地全部发货明细</b>，再把 ERP 里的出货明细整表写回。'
+      + `<br>当前本地 ${escapeHtml(num(s.rows))} 行，覆盖期间页面数据会短暂不完整。`
+      + '<br>确定现在做吗？',
+      { title: '全量同步（整表覆盖）', danger: true });
+    if (!ok) return;
+    return startRun(S2, '/delivery/details/sync/full',
+      '全量同步已开始，整表覆盖需要一会儿…', load2, 120);
+  }
+
+  async function toggleAuto2(el, on) {
+    try {
+      await api('/delivery/details/config',
+        { method: 'PUT', body: { auto_enabled: on ? '1' : '0' } });
+      toast(on ? '已启用自动同步' : '已关闭自动同步', 'success');
+    } catch (e) {
+      toast(apiErr(e), 'error');
+      el.checked = !on;
+    }
+    await load2(false);
+  }
+
+  /* ================= 连接配置（**两个任务各一份**） =================
+     ★ 2026-09-22 起拆开：匹配库存 `erp_*`、发货明细存 `ship_erp_*`，
+     两张卡上的「连接配置」只改自己那份（后端两个接口各认各的白名单）。
+     共用一份时「改一处、忘了另一处」是最难发现的一类故障 ——
+     两个界面都显示正常，只有一个同步在后台连不上。
+     写操作分别归 act.items_sync / act.delivery_detail。 */
+  function openConnConfig(which) {
+    const isShip = which === 'ship';
+    const s = (isShip ? S2.status : S1.status) || {};
+    const f = {};
+    const mk = (label, key, val, ph) => {
+      const el = h('input', { class: 'input', placeholder: ph || '' });
+      el.value = val === undefined || val === null ? '' : String(val);
+      f[key] = el;
+      return h('label', { class: 'field' }, [
+        h('span', { class: 'field__label' }, label), el,
+      ]);
+    };
+    const body = h('div', {}, [
+      h('div', { class: 'small muted', style: { marginBottom: '12px' } },
+        isShip
+          ? '这是**发货明细**专用的连接（存 ship_erp_*）。'
+            + '改它只影响「发货明细 · ERP 出货单」，不动匹配数据库那份。'
+          : '这是**匹配数据库**专用的连接（存 erp_*）。'
+            + '改它只影响「匹配数据库 · 物料主档」，不动发货明细那份。'),
+      mk('ERP 地址', 'host', s.host, '192.168.1.247'),
+      mk('端口', 'port', s.port, '1433'),
+      mk('数据库', 'db', s.db, 'BLFN'),
+      mk('账号', 'user', s.user, 'sh_report_user'),
+      mk('密码（留空＝不修改）', 'password', '', '留空则不改变已保存的密码'),
+      /* 间隔也用各自的键：匹配库 interval_hours（默认 12h）、
+         发货明细 auto_interval_hours（默认 8h）。 */
+      mk('同步间隔（小时）', isShip ? 'auto_interval_hours' : 'interval_hours',
+         s.interval_hours, isShip ? '8' : '12'),
+      h('div', { class: 'small muted' },
+        '密码只写不读：接口不会回显已保存的密码，留空即保持原值。'
+        + '其余字段留空会**回落到默认值**（不再留一个空值在库里）。'),
+    ]);
+    const m = openModal({
+      title: isShip ? 'ERP 连接配置 · 发货明细'
+                      : 'ERP 连接配置 · 匹配数据库',
+      body,
+      /* ⚠️ 必须写 `footer:` —— common.js 的 openModal 只认
+         `{title, body, footer, wide, narrow, onClose}`，没有 `buttons`。
+         早先写成 `buttons:` 的结果是**弹窗一个按钮都没有**（不报错，
+         就是没有保存入口）。 */
+      footer: [
+        h('button', { class: 'btn', onclick: () => m.close() }, '取消'),
+        h('button', {
+          class: 'btn btn--primary',
+          onclick: async () => {
+            const payload = {};
+            Object.entries(f).forEach(([k, el]) => {
+              payload[k] = el.value.trim();
+            });
+            try {
+              // 一次 PUT 就够：服务端的白名单只认本任务那几个键，别的键
+              // 会被丢掉 —— 所以不用再把 payload 拆成两半分头提交。
+              await api(isShip ? '/delivery/details/config'
+                               : '/items/sync/config',
+                        { method: 'PUT', body: payload });
+              m.close();
+              toast('已保存', 'success');
+              await (isShip ? load2(false) : load1(false));
+            } catch (e) { toast(apiErr(e), 'error'); }
+          },
+        }, '保存'),
+      ],
+    });
+  }
+
+  /* ================= 启动 ================= */
+  async function refreshAll(showToast) {
+    await Promise.all([load1(false), load2(false)]);
+    if (showToast) toast('已刷新', 'success');
+  }
+  await refreshAll(false);
+})();
+</script>
+</body>
+</html>

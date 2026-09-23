@@ -1,0 +1,1275 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>核销台账 · 售后返件登记系统</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" href="/static/assets/favicon.png?v=20260923b">
+  <link rel="apple-touch-icon" href="/static/assets/logo.png?v=20260923b">
+<link rel="stylesheet" href="/static/assets/app.css?v=20260923b">
+<style>
+  /* ================= 页面专属样式（只服务核销台账页）================= */
+  .dlvl-sum { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .dlvl-sum__item { display: flex; align-items: baseline; gap: 5px; }
+  .dlvl-sum__n { font-size: 19px; font-weight: 650; color: var(--text-primary); line-height: 1; }
+  .dlvl-sum__n.warn { color: var(--danger); }
+  .dlvl-sum__n.ok { color: var(--success); }
+  .dlvl-sum__k { font-size: 12px; color: var(--text-tertiary); }
+  .dlvl-sum__sub { font-size: 11px; color: var(--text-tertiary); }
+  .dlvl-sum__sep { width: 1px; height: 22px; background: var(--border); }
+
+  .dlvl-chk { display: inline-flex; align-items: center; gap: 6px;
+    font-size: 13px; color: var(--text-secondary); cursor: pointer;
+    user-select: none; white-space: nowrap; }
+  .dlvl-chk input { width: 14px; height: 14px; cursor: pointer; }
+
+  /* 口径说明条：演示口径必须显眼（否则用户会以为登记数据丢了） */
+  .dlvl-note { margin-bottom: 12px; padding: 9px 12px; border-radius: var(--radius);
+    font-size: 12.5px; line-height: 1.9; border: 1px solid; }
+  .dlvl-note.demo { background: #fff8e6; border-color: #f0d69a; color: #8a6100; }
+  .dlvl-note.req { background: var(--bg-subtle); border-color: var(--border);
+    color: var(--text-secondary); }
+  .dlvl-note b { font-weight: 650; }
+  .dlvl-note .lnk { color: var(--brand); cursor: pointer; text-decoration: underline; }
+
+  table.dlvl-t { min-width: 1100px; }
+  table.dlvl-t th { white-space: nowrap; }
+  table.dlvl-t td { vertical-align: middle; }
+  table.dlvl-t td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  table.dlvl-t td.acts { white-space: nowrap; }
+  table.dlvl-t tr.todo { background: #fffdf7; }
+  table.dlvl-t tr.done { background: #f8fdf9; }
+
+  .dlvl-pend { font-weight: 650; color: var(--danger); font-size: 13px; }
+  .dlvl-pend.zero { color: var(--text-tertiary); font-weight: 400; }
+  .dlvl-sub { font-size: 11px; color: var(--text-tertiary); }
+
+  /* 状态标签 */
+  .dlvl-tag { display: inline-block; font-size: 11px; font-weight: 600;
+    border-radius: 3px; padding: 1px 6px; line-height: 17px; white-space: nowrap; }
+  .dlvl-tag.wait { color: #8a6100; background: #fff8e6; border: 1px solid #f0d69a; }
+  .dlvl-tag.part { color: #1b5e8a; background: #eef6fd; border: 1px solid #bcd9ee; }
+  .dlvl-tag.done { color: var(--success); background: #eef9f1; border: 1px solid #bfe3ca; }
+  .dlvl-tag.auto { color: #5b3d8a; background: #f5f0fc; border: 1px solid #d9c9f0; }
+
+  .dlvl-sec__title {
+    font-size: 12.5px; font-weight: 600; color: var(--text-secondary);
+    margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+  }
+  .dlv-err {
+    display: none; margin-bottom: 12px; padding: 9px 12px; border-radius: var(--radius);
+    background: var(--danger-light); border: 1px solid #f3c2c2; color: var(--danger);
+    font-size: 12.5px; line-height: 1.8;
+  }
+  .dlv-err.on { display: block; }
+  .dlvl-kv { display: grid; grid-template-columns: 92px 1fr; gap: 6px 12px;
+    margin: 0 0 16px; font-size: 13px; }
+  .dlvl-kv dt { color: var(--text-tertiary); font-size: 12px; }
+  .dlvl-kv dd { margin: 0; word-break: break-all; }
+  .dlvl-detail { font-size: 13px; }
+  .dlvl-detail table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .dlvl-detail th { background: var(--bg-subtle); color: var(--text-secondary);
+    font-weight: 600; font-size: 11.5px; padding: 6px 8px; text-align: left;
+    white-space: nowrap; border-bottom: 1px solid var(--border); }
+  .dlvl-detail th.num, .dlvl-detail td.num { text-align: right; }
+  .dlvl-detail td { padding: 5px 8px; border-bottom: 1px solid var(--border); }
+  .dlvl-detail .mono { font-family: var(--font-mono); font-size: 11.5px; }
+  .dlvl-detail .dlvl-sec__title { margin-top: 18px; }
+
+  /* 二级页页签 */
+  .dlvl-tabs { display: flex; gap: 4px; flex-wrap: wrap;
+    border-bottom: 1px solid var(--border); margin: 0 0 12px; }
+  .dlvl-tab { border: 1px solid transparent; border-bottom: none; background: none;
+    font-size: 12.5px; color: var(--text-secondary); cursor: pointer;
+    padding: 6px 11px; border-radius: var(--radius) var(--radius) 0 0; margin-bottom: -1px; }
+  .dlvl-tab:hover { color: var(--text-primary); }
+  .dlvl-tab.on { color: var(--text-primary); font-weight: 600; background: var(--bg-subtle);
+    border-color: var(--border); }
+  .dlvl-tab .cnt { color: var(--text-tertiary); font-weight: 400; }
+
+  .dlvl-acts { display: flex; gap: 6px; flex-wrap: wrap; }
+  .dlvl-pair { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<script src="/static/assets/common.js?v=20260923b"></script>
+<script>
+(async () => {
+  const needTag = h('span', { class: 'tag' }, '口径 —');
+  const countTag = h('span', { class: 'tag' }, '— 行');
+  const content = await mountLayout('delivery-ledger', '核销台账',
+    '以「发货明细」里的售后发货单为基准；维度＝整机厂家 + 项目风场；'
+    + '剩余未返回 = 发货（需返回的）− 已返回 − 已核销',
+    [needTag, countTag]);
+
+  let META = { ledger_dimensions: [] };
+  try {
+    META = await api('/delivery/meta');
+  } catch (e) {
+    content.replaceChildren(h('div', { class: 'empty' }, '加载失败：' + e.message));
+    return;
+  }
+
+  const canWrite = () => hasPerm('act.delivery_clear');
+  const PAGE_SIZE = 20;
+
+  /* ================= 列表状态 ================= */
+  let listRows = [];
+  let total = 0;
+  let page = 1;
+  let summary = {};
+  let meta = {};
+  let opts = { vendors: [], sites: [], status: [] };
+  let keyword = '';
+  let fVendor = '';
+  // 2026-09-23 用户口径：口径自动判断（fNeed 固定 auto，页面上不再给下拉），
+  // 排序固定「待核销多→少」（sortBy 固定 pend，sort_dir 走后端默认 desc）。
+  let fNeed = 'auto';
+  let onlyPending = false;
+  let onlyUnlink = false;
+  let onlyNoSite = false;
+  let sortBy = 'pend';
+
+  function buildQuery(params) {
+    const sp = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v === null || v === undefined || v === '' || v === false) return;
+      sp.append(k, v === true ? '1' : v);
+    });
+    return sp.toString();
+  }
+
+  function apiErr(e) {
+    return (e.detail && e.detail.message) ? e.detail.message
+      : (typeof e.detail === 'string' ? e.detail : e.message);
+  }
+
+  function qty(v) {
+    const n = Number(v || 0);
+    return Number.isInteger(n) ? String(n) : n.toFixed(1);
+  }
+
+  function statusTag(st) {
+    const cls = st === '已核销' ? 'done' : (st === '部分核销' ? 'part' : 'wait');
+    return h('span', { class: 'dlvl-tag ' + cls }, st || '待核销');
+  }
+
+  /* ================= 汇总条 ================= */
+  const sumBox = h('div', { class: 'dlvl-sum' });
+  function renderSummary() {
+    const mk = (n, k, cls, sub) => h('div', { class: 'dlvl-sum__item' }, [
+      h('span', { class: 'dlvl-sum__n' + (cls ? ' ' + cls : '') }, String(n)),
+      h('span', { class: 'dlvl-sum__k' }, k),
+      sub ? h('span', { class: 'dlvl-sum__sub' }, sub) : null,
+    ]);
+    sumBox.replaceChildren(
+      mk(summary.rows || 0, '个维度'),
+      h('div', { class: 'dlvl-sum__sep' }),
+      mk(summary.docs || 0, '张发货单'),
+      h('div', { class: 'dlvl-sum__sep' }),
+      mk(qty(summary.ship_qty), '件发货'),
+      h('div', { class: 'dlvl-sum__sep' }),
+      mk(qty(summary.ret_qty), '件已返回'),
+      h('div', { class: 'dlvl-sum__sep' }),
+      mk(qty(summary.clr_qty), '件已核销',
+        summary.clr_qty > 0 ? 'ok' : '', `（关联 ${qty(summary.clr_link)} / 清账 ${qty(summary.clr_clear)}）`),
+      h('div', { class: 'dlvl-sum__sep' }),
+      mk(qty(summary.pend_qty), '件待核销',
+        summary.pend_qty > 0 ? 'warn' : 'ok'),
+      h('div', { class: 'dlvl-sum__sep' }),
+      mk(qty(summary.unlink_qty), '件返件未核销'),
+    );
+  }
+  renderSummary();
+
+  /* ================= 口径说明条 ================= */
+  const noteBox = h('div', { class: 'dlvl-note' });
+  function renderNote() {
+    const m = meta || {};
+    needTag.textContent = m.need_mode === 'req' ? '口径：发货申请单' : '口径：料号前缀（演示）';
+    needTag.className = 'tag' + (m.need_mode === 'req' ? '' : ' tag--brand');
+    if (m.need_mode === 'req') {
+      noteBox.className = 'dlvl-note req';
+      noteBox.replaceChildren(
+        h('div', {}, [
+          h('b', {}, '需返回口径：发货申请单（正式）'),
+          ` —— 命中 ${m.need_docs || 0} 张申请单 / ${m.need_rows || 0} 行明细；`,
+          `本次纳入 ${m.ship_lines || 0} 行售后发货单、${m.ship_docs || 0} 张单。`,
+        ]),
+        h('div', {}, `返件归位：已归位 ${m.ret_matched_lines || 0} 行（${qty(m.ret_matched_qty)} 件）、`
+          + `歧义 ${m.ret_ambiguous_lines || 0} 行（${qty(m.ret_ambiguous_qty)} 件）、`
+          + `未匹配 ${m.ret_unmatched_lines || 0} 行（${qty(m.ret_unmatched_qty)} 件）`),
+        h('div', { class: 'dlvl-sub' },
+          `另有 ${m.unattr_cleared_lines || 0} 行未归属返件已人工清账 / 关联；`
+          + `${m.ret_sales_lines || 0} 行销售端返件（${qty(m.ret_sales_qty)} 件）`
+          + '按「不显示销售端返件」的口径剔除 —— '),
+        h('div', { class: 'dlvl-sub' },
+          `「已返回」只统计归位到某个维度上的返件（当前 ${qty(m.ret_matched_qty)} 件），`
+          + `归位不上的 ${qty((m.ret_ambiguous_qty || 0) + (m.ret_unmatched_qty || 0))} 件`
+          + '不会算进任何一行。最常见的原因是返件登记时整机厂家 / 项目风场填的是「(待补充)」；'
+          + '补录这两列最省事，也可以在上面的别名表里把它指到某个厂家 / 风场。'),
+        h('div', { class: 'dlvl-pair' }, [
+          h('span', { class: 'lnk', onclick: () => openUnmatched() },
+            '查看未归属的返件 / 维护厂家·风场别名'),
+        ]),
+      );
+    } else {
+      noteBox.className = 'dlvl-note demo';
+      noteBox.replaceChildren(
+        h('div', {}, [
+          h('b', {}, '需返回口径：料号前缀（演示）'),
+          ` —— 发货申请单还没有明细数据（命中 ${m.need_docs || 0} 张），`
+          + `所以暂时按料号前 ${(m.demo_prefixes || []).join(' / ')} 判断；`
+          + `本次纳入 ${m.ship_lines || 0} 行售后发货单、${m.ship_docs || 0} 张单。`,
+        ]),
+        h('div', {}, '发货申请单录入「需返回」明细后，这里会自动切到正式口径，不用改任何设置。'),
+        h('div', {}, `返件归位：已归位 ${m.ret_matched_lines || 0} 行（${qty(m.ret_matched_qty)} 件）、`
+          + `歧义 ${m.ret_ambiguous_lines || 0} 行（${qty(m.ret_ambiguous_qty)} 件）、`
+          + `未匹配 ${m.ret_unmatched_lines || 0} 行（${qty(m.ret_unmatched_qty)} 件）`),
+        h('div', { class: 'dlvl-sub' },
+          `另有 ${m.unattr_cleared_lines || 0} 行未归属返件已人工清账 / 关联；`
+          + `${m.ret_sales_lines || 0} 行销售端返件（${qty(m.ret_sales_qty)} 件）`
+          + '按「不显示销售端返件」的口径剔除 —— '),
+        h('div', { class: 'dlvl-sub' },
+          `「已返回」只统计归位到某个维度上的返件（当前 ${qty(m.ret_matched_qty)} 件），`
+          + `归位不上的 ${qty((m.ret_ambiguous_qty || 0) + (m.ret_unmatched_qty || 0))} 件`
+          + '不会算进任何一行。最常见的原因是返件登记时整机厂家 / 项目风场填的是「(待补充)」；'
+          + '补录这两列最省事，也可以在上面的别名表里把它指到某个厂家 / 风场。'),
+        h('div', { class: 'dlvl-pair' }, [
+          h('span', { class: 'lnk', onclick: () => openUnmatched() },
+            '查看未归属的返件 / 维护厂家·风场别名'),
+        ]),
+      );
+    }
+  }
+  renderNote();
+
+  /* ================= 筛选区 ================= */
+  const kwInput = h('input', {
+    class: 'input', type: 'text', style: { width: '190px' },
+    placeholder: '厂家 / 风场 / 单号 / 料号…',
+  });
+  let kwTimer = null;
+  kwInput.addEventListener('input', () => {
+    clearTimeout(kwTimer);
+    kwTimer = setTimeout(() => {
+      keyword = kwInput.value.trim(); page = 1; loadList();
+    }, 320);
+  });
+
+  const vendorSel = fixedSelect({
+    name: 'ledger_vendor', value: '', placeholder: null,
+    options: [{ value: '', label: '全部厂家' }],
+    onChange: v => { fVendor = v; page = 1; loadList(); },
+  });
+
+  const pendingChk = h('input', { type: 'checkbox' });
+  pendingChk.addEventListener('change', () => {
+    onlyPending = pendingChk.checked; page = 1; loadList();
+  });
+  const unlinkChk = h('input', { type: 'checkbox' });
+  unlinkChk.addEventListener('change', () => {
+    onlyUnlink = unlinkChk.checked; page = 1; loadList();
+  });
+  const noSiteChk = h('input', { type: 'checkbox' });
+  noSiteChk.addEventListener('change', () => {
+    onlyNoSite = noSiteChk.checked; page = 1; loadList();
+  });
+  // 客户栏里没写「（风场）」的行不删不猜：列里标「（风场为空）」，这里单独筛出来看
+  const noSiteLbl = h('span', {}, '只看未填风场');
+  function renderNoSiteLabel() {
+    noSiteLbl.textContent = '只看未填风场（' + num(meta.no_site_groups || 0) + '）';
+  }
+
+  const exportBtn = h('button', {
+    class: 'btn btn--sm', onclick: () => exportCsv(),
+  }, '导出当前视图');
+
+  const aliasBtn = h('button', {
+    class: 'btn btn--sm', onclick: () => openAlias(),
+  }, '厂家 / 风场别名');
+
+  // 按型号自动核销（2026-09-23 用户口径）：按钮触发 → 先试算给人看 →
+  // 确认后才真写 kind='auto' 的记录，每条都能在「核销明细」里撤销。
+  const autoBtn = canWrite() ? h('button', {
+    class: 'btn btn--sm btn--primary',
+    onclick: () => openAutoDialog(null, afterAutoAll),
+  }, '按型号自动核销') : null;
+  const toolBtns = autoBtn ? [autoBtn, aliasBtn, exportBtn] : [aliasBtn, exportBtn];
+  async function afterAutoAll() {
+    await loadOptions();
+    await loadList();
+  }
+
+  const listHost = h('div', { class: 'table-wrap' });
+  const pagerBox = h('div', { class: 'pager' });
+
+  const filterCard = h('div', { class: 'card mb16' }, [
+    h('div', { class: 'card__body' }, [
+      noteBox,
+      h('div', { class: 'inspect-toolbar' }, [
+        kwInput, vendorSel,
+        h('label', { class: 'dlvl-chk' }, [pendingChk, h('span', {}, '只看待核销')]),
+        h('label', { class: 'dlvl-chk' }, [unlinkChk, h('span', {}, '只看有未核销返件')]),
+        h('label', { class: 'dlvl-chk' }, [noSiteChk, noSiteLbl]),
+        h('div', { class: 'inspect-toolbar__spacer' }),
+        ...toolBtns,
+        h('button', { class: 'btn btn--sm', onclick: () => loadList() }, '刷新'),
+      ]),
+    ]),
+  ]);
+
+  const listCard = h('div', { class: 'card' }, [
+    h('div', { class: 'card__head' }, [
+      h('div', { class: 'card__title' }, '未返回台账'),
+      h('div', { class: 'card__hint' },
+        '一行 = 一个整机厂家下的一个项目风场；排序固定按「待核销」从多到少；'
+        + '点「明细」进二级页核对发货单与返件'),
+    ]),
+    h('div', { class: 'card__body' }, [sumBox, h('div', { style: { height: '12px' } }),
+      listHost, pagerBox]),
+  ]);
+
+  content.replaceChildren(filterCard, listCard);
+
+  /* ================= 下拉项 ================= */
+  async function loadOptions() {
+    try {
+      const o = await api('/delivery/ledger/options?' + buildQuery({ need_mode: fNeed }));
+      opts = o || opts;
+      meta = o.meta || meta;
+      renderNoSiteLabel();
+      renderNote();
+      vendorSel.setOptions([{ value: '', label: '全部厂家' }]
+        .concat((opts.vendors || []).map(v => ({ value: v, label: v }))));
+    } catch (e) { /* 下拉项拿不到不影响主表 */ }
+  }
+
+  /* ================= 数据加载 ================= */
+  // 主表与导出共用同一组筛选条件，避免「看到的是筛过的、导出的是全部」
+  function listParams(extra) {
+    const params = { sort_by: sortBy, need_mode: fNeed };
+    if (keyword) params.keyword = keyword;
+    if (fVendor) params.turbine_vendor = fVendor;
+    if (onlyPending) params.only_pending = 1;
+    if (onlyUnlink) params.only_unlink = 1;
+    if (onlyNoSite) params.only_no_site = 1;
+    return Object.assign(params, extra || {});
+  }
+
+  async function loadList() {
+    const params = listParams({ page, page_size: PAGE_SIZE });
+    listHost.replaceChildren(h('div', { class: 'empty' }, '加载中…'));
+    let res;
+    try {
+      res = await api('/delivery/ledger?' + buildQuery(params));
+    } catch (e) {
+      listHost.replaceChildren(h('div', { class: 'empty' }, '加载失败：' + apiErr(e)));
+      return;
+    }
+    listRows = res.rows || [];
+    total = res.total || 0;
+    summary = res.summary || summary;
+    meta = res.meta || meta;
+    renderNoSiteLabel();
+    renderSummary();
+    renderNote();
+    renderList();
+    renderPager();
+    countTag.textContent = `${summary.pend_rows || 0} 个维度待核销`;
+    countTag.className = 'tag' + (summary.pend_rows ? ' tag--brand' : '');
+  }
+
+  function renderPager() {
+    const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    if (pages <= 1) { pagerBox.replaceChildren(); return; }
+    pagerBox.replaceChildren(
+      h('button', {
+        class: 'btn btn--sm', disabled: page <= 1,
+        onclick: () => { page -= 1; loadList(); },
+      }, '上一页'),
+      h('span', { class: 'small muted', style: { padding: '0 6px' } }, `${page} / ${pages}`),
+      h('button', {
+        class: 'btn btn--sm', disabled: page >= pages,
+        onclick: () => { page += 1; loadList(); },
+      }, '下一页'),
+    );
+  }
+
+  function renderList() {
+    if (!listRows.length) {
+      listHost.replaceChildren(h('div', { class: 'empty' },
+        '没有符合条件的数据。台账只统计「发货明细」里 doc_type = 售后发货单 '
+        + '且 doc_status = 已核准、并且属于需返回范围的发货行 —— '
+        + '若为空请先确认「发货明细」已经同步过。'));
+      return;
+    }
+    const cols = ['整机厂家', '项目风场', '发货单', '发货件数', '已返回',
+      '已核销', '待核销', '返件未核销', '状态', '操作'];
+    const thead = h('thead', {}, h('tr', {}, cols.map((c, i) =>
+      h('th', i >= 2 && i <= 7 ? { class: 'num' } : {}, c))));
+
+    const tbody = h('tbody', {}, listRows.map(r => {
+      const pend = Number(r.pend_qty || 0);
+      return h('tr', {
+        class: pend > 0 ? 'todo' : 'done',
+      }, [
+        h('td', {}, r.turbine_vendor || '—'),
+        h('td', {}, r.project_site || h('span', { class: 'muted' }, '（风场为空）')),
+        h('td', { class: 'num' }, String(r.docs_n || 0)),
+        h('td', { class: 'num' }, qty(r.ship_qty)),
+        h('td', { class: 'num' }, qty(r.ret_qty)),
+        h('td', { class: 'num' }, [
+          h('span', {}, qty(r.clr_qty)),
+          (Number(r.clr_link || 0) || Number(r.clr_clear || 0))
+            ? h('div', { class: 'dlvl-sub' },
+              `关联 ${qty(r.clr_link)} / 清账 ${qty(r.clr_clear)}`) : null,
+        ]),
+        h('td', { class: 'num' }, h('span',
+          { class: 'dlvl-pend' + (pend > 0 ? '' : ' zero') }, qty(pend))),
+        h('td', { class: 'num' }, qty(r.unlink_qty)),
+        h('td', {}, statusTag(r.status)),
+        h('td', { class: 'acts' }, [
+          h('button', {
+            class: 'btn btn--sm btn--primary', onclick: () => showDetail(r),
+          }, '明细'),
+        ]),
+      ]);
+    }));
+    listHost.replaceChildren(h('table', { class: 'table table--compact dlvl-t' },
+      [thead, tbody]));
+  }
+
+  /* ================= 二级页（5 张表）================= */
+  function miniTable(cols, rows, mapper, emptyText) {
+    if (!rows.length) {
+      return h('div', { class: 'empty', style: { padding: '14px' } },
+        emptyText || '（没有记录）');
+    }
+    return h('div', { class: 'table-wrap' }, h('table', {}, [
+      h('thead', {}, h('tr', {}, cols.map(c =>
+        h('th', c && c.num ? { class: 'num' } : {}, c && c.label ? c.label : c)))),
+      h('tbody', {}, rows.map(x => h('tr', {}, mapper(x)))),
+    ]));
+  }
+
+  async function showDetail(r) {
+    let d;
+    try {
+      d = await api('/delivery/ledger/detail?' + buildQuery({
+        turbine_vendor: r.turbine_vendor,
+        project_site: r.project_site,
+        need_mode: fNeed,
+      }));
+    } catch (e) {
+      toast('读取失败：' + apiErr(e), 'error');
+      return;
+    }
+    const s = d.summary || {};
+    const kv = h('dl', { class: 'dlvl-kv' }, [
+      h('dt', {}, '整机厂家'), h('dd', {}, d.turbine_vendor || '—'),
+      h('dt', {}, '项目风场'), h('dd', {}, d.project_site || '（风场为空）'),
+      h('dt', {}, '发货 / 已返回 / 已核销'),
+      h('dd', {}, `${qty(s.ship_qty)} 件 − ${qty(s.ret_qty)} 件（已返回）`
+        + ` − ${qty(s.clr_qty)} 件（已核销：自动 ${qty(s.clr_auto)} / 手动关联 ${qty(s.clr_link)}`
+        + ` / 手工清账 ${qty(s.clr_clear)} / 发货侧清账 ${qty(s.clr_ship)}）`
+        + ` = 待核销 ${qty(s.pend_qty)} 件`),
+      h('dt', {}, '返件未核销'), h('dd', {},
+        `${qty(s.unlink_qty)} 件 —— 已返回但还没有核销关联的件数`),
+    ]);
+
+    /* 发货侧清账：一张单 / 一行 都能清（用户 2026-09-23 口径） */
+    const shipClearBtn = (x, scope) => {
+      if (!canWrite()) return h('td', {}, '—');
+      const left = scope === 'shipdoc' ? Number(x.pend || 0)
+        : Number(x.ship_remain || 0);
+      if (left <= 0) return h('td', {}, h('span', { class: 'muted' }, '已清完'));
+      return h('td', { class: 'acts' }, h('div', { class: 'dlvl-acts' }, [
+        h('button', {
+          class: 'btn btn--sm',
+          onclick: () => openShipClearDialog(d, x, scope),
+        }, '手动清账'),
+      ]));
+    };
+
+    /* --- t1 发货单核销（用户口径：二级页以发货单为基准）--- */
+    const t1 = miniTable(
+      ['发货单号', '发货日期', '客户', { label: '行数', num: true },
+        { label: '发货数量', num: true }, { label: '已核销', num: true },
+        { label: '待核销', num: true }, '状态', '操作'],
+      d.docs || [],
+      x => [
+        h('td', { class: 'mono' }, x.doc_no || '—'),
+        h('td', {}, x.doc_date || '—'),
+        h('td', {}, x.customer || '—'),
+        h('td', { class: 'num' }, String(x.lines || 0)),
+        h('td', { class: 'num' }, qty(x.qty)),
+        h('td', { class: 'num' }, qty(x.clr)),
+        h('td', { class: 'num' }, h('span',
+          { class: 'dlvl-pend' + (Number(x.pend || 0) > 0 ? '' : ' zero') },
+          qty(x.pend))),
+        h('td', {}, statusTag(x.status)),
+        shipClearBtn(x, 'shipdoc'),
+      ],
+      '这个维度还没有发货单 —— 请先确认「发货明细」同步与需返回口径。');
+
+    /* --- t2 发货行明细（序列号拆行：1 个序列号 = 1 行 × 1 件）--- */
+    const t2 = miniTable(
+      ['发货单号', '发货日期', { label: '料号', num: false }, '产品名称', '型号',
+        { label: '数量', num: true }, '序列号', { label: '已清账', num: true },
+        { label: '待核销', num: true }, '客户', '操作'],
+      d.lines || [],
+      x => [
+        h('td', { class: 'mono' }, x.doc_no || '—'),
+        h('td', {}, x.doc_date || '—'),
+        h('td', { class: 'mono' }, x.material_no || '—'),
+        h('td', {}, x.material_name || '—'),
+        h('td', {}, x.product_model || '—'),
+        h('td', { class: 'num' }, qty(x.qty)),
+        h('td', { class: 'mono' }, x.serial_no
+          ? (x.split ? `${x.serial_no}（${x.split_part}/${x.split_total}）` : x.serial_no)
+          : '—'),
+        h('td', { class: 'num' }, qty(x.clr_qty)),
+        h('td', { class: 'num' }, qty(x.ship_remain)),
+        h('td', {}, x.customer || '—'),
+        shipClearBtn(x, 'ship'),
+      ]);
+
+    /* --- t3 返件明细（已归位到本维度的返件）--- */
+    const retActs = x => {
+      if (!canWrite()) return null;
+      const btns = [];
+      if (Number(x.unlink_qty || 0) > 0) {
+        btns.push(h('button', {
+          class: 'btn btn--sm btn--primary',
+          onclick: () => openLinkDialog(d, x, reload),
+        }, '手动核销关联'));
+        btns.push(h('button', {
+          class: 'btn btn--sm',
+          onclick: () => openClearDialog(d, x, reload),
+        }, '手动清账'));
+      }
+      return h('td', { class: 'acts' }, h('div', { class: 'dlvl-acts' }, btns));
+    };
+    const t3 = miniTable(
+      ['退回单号', '退回日期', '料号', '型号', '品名',
+        { label: '数量', num: true }, { label: '已自动', num: true },
+        { label: '已关联', num: true },
+        { label: '已清账', num: true }, '状态', '登记人', '操作'],
+      d.returns || [],
+      x => [
+        h('td', { class: 'mono' }, x.return_no || '—'),
+        h('td', {}, x.return_date || '—'),
+        h('td', { class: 'mono' }, x.material_no || '—'),
+        h('td', {}, x.product_model || '—'),
+        h('td', {}, x.product_name || '—'),
+        h('td', { class: 'num' }, qty(x.qty)),
+        h('td', { class: 'num' }, qty(x.auto_qty)),
+        h('td', { class: 'num' }, qty(x.link_qty)),
+        h('td', { class: 'num' }, qty(x.clear_qty)),
+        h('td', {}, statusTag(x.status)),
+        h('td', {}, x.registrar || '—'),
+        retActs(x) || h('td', {}, '—'),
+      ],
+      '这个维度还没有已归位的返件 —— 返件按「整机厂家 + 项目风场」自动归位，'
+      + '名字不一致的可以在「厂家 / 风场别名」里校准。');
+
+    /* --- t4 核销明细（自动 + 关联 + 清账混排）--- */
+    const KIND_NAME = { link: '手动关联', clear: '手工清账', auto: '自动核销',
+                        ship: '发货侧清账' };
+    const KIND_CLS = { link: 'part', clear: 'wait', auto: 'auto', ship: 'done' };
+    const t4 = miniTable(
+      ['方式', '退回单号', '料号', { label: '件数', num: true }, '原因',
+        '操作人', '时间', '操作'],
+      d.clears || [],
+      x => [
+        h('td', {}, h('span', { class: 'dlvl-tag ' + (KIND_CLS[x.kind] || 'wait') },
+          KIND_NAME[x.kind] || '手工清账')),
+        h('td', { class: 'mono' }, x.return_no || '—'),
+        h('td', { class: 'mono' }, x.material_no || '—'),
+        h('td', { class: 'num' }, qty(x.qty)),
+        h('td', {}, x.reason || '—'),
+        h('td', {}, x.operator || '—'),
+        h('td', { class: 'mono' }, x.created_at || '—'),
+        h('td', { class: 'acts' }, canWrite() ? h('button', {
+          class: 'btn btn--sm btn--danger',
+          onclick: () => removeClear(x, reload),
+        }, '撤销') : '—'),
+      ]);
+
+    /* --- t5 未关联返件（用户口径④：两个按钮并排）--- */
+    const t5 = miniTable(
+      ['退回单号', '退回日期', '料号', '型号', '品名',
+        { label: '数量', num: true }, { label: '已核销', num: true },
+        '登记人', '操作'],
+      (d.returns || []).filter(x => Number(x.unlink_qty || 0) > 0),
+      x => [
+        h('td', { class: 'mono' }, x.return_no || '—'),
+        h('td', {}, x.return_date || '—'),
+        h('td', { class: 'mono' }, x.material_no || '—'),
+        h('td', {}, x.product_model || '—'),
+        h('td', {}, x.product_name || '—'),
+        h('td', { class: 'num' }, qty(x.qty)),
+        h('td', { class: 'num' }, qty(x.unlink_qty)),
+        h('td', {}, x.registrar || '—'),
+        h('td', { class: 'acts' }, canWrite() ? h('div', { class: 'dlvl-acts' }, [
+          h('button', {
+            class: 'btn btn--sm btn--primary',
+            onclick: () => openLinkDialog(d, x, reload),
+          }, '手动核销关联'),
+          h('button', {
+            class: 'btn btn--sm',
+            onclick: () => openClearDialog(d, x, reload),
+          }, '手动清账'),
+        ]) : h('span', { class: 'muted' }, '无权限')),
+      ],
+      '已返回的返件都核销完了 —— 没有「已返回但未核销关联」的记录。');
+
+    const panes = [t1, t2, t3, t4, t5];
+    const titles = [
+      ['① 发货单核销', (d.docs || []).length],
+      ['② 发货行明细', (d.lines || []).length],
+      ['③ 返件明细', (d.returns || []).length],
+      ['④ 核销明细', (d.clears || []).length],
+      ['⑤ 未关联返件', (d.returns || []).filter(x => Number(x.unlink_qty || 0) > 0).length],
+    ];
+    const paneBox = h('div', {});
+    function pickTab(i) {
+      tabBtns.forEach((b, k) => b.classList.toggle('on', k === i));
+      paneBox.replaceChildren(panes[i]);
+    }
+    const tabBtns = titles.map((t, i) => h('button', {
+      class: 'dlvl-tab' + (i === 0 ? ' on' : ''),
+      onclick: () => pickTab(i),
+    }, [h('span', {}, t[0] + ' '), h('span', { class: 'cnt' }, `(${t[1]})`)]));
+    paneBox.replaceChildren(panes[0]);
+
+    const body = h('div', { class: 'dlvl-detail' }, [
+      kv,
+      h('div', { class: 'small muted', style: { margin: '8px 0 10px' } },
+        '返件明细按型号从上到下自动核销，核销不上的沉在后面，用行尾「手动核销关联」处理；'
+        + '发货单与发货行都能单独清账（清账只减「待核销」，不动「已返回但未核销关联」）。'),
+      h('div', { class: 'dlvl-tabs' }, tabBtns),
+      paneBox,
+    ]);
+
+    const m = openModal({
+      title: '核销明细 · ' + (d.turbine_vendor || '')
+        + (d.project_site ? ' / ' + d.project_site : ''),
+      wide: true, body,
+      footer: [
+        ...(canWrite() ? [h('button', {
+          class: 'btn btn--primary',
+          onclick: () => openAutoDialog(d, reload),
+        }, '本维度按型号自动核销')] : []),
+        h('button', { class: 'btn', onclick: () => m.close() }, '关闭'),
+      ],
+    });
+
+    // 二级页里做了核销/撤销之后：刷新二级页数据 + 背后的主列表
+    async function reload() {
+      await loadList();
+      m.close();
+      const fresh = listRows.find(x => x.turbine_vendor === r.turbine_vendor
+        && (x.project_site || '') === (r.project_site || ''));
+      if (fresh) showDetail(fresh);
+    }
+  }
+
+  /* ================= 核销动作 ================= */
+  function actionDialog(cfg) {
+    const qtyIn = h('input', {
+      class: 'input', type: 'number', min: '1', step: '1',
+      max: String(cfg.maxQty), style: { width: '120px' },
+      placeholder: `最多 ${qty(cfg.maxQty)} 件`,
+    });
+    const reasonIn = h('textarea', {
+      class: 'textarea', rows: '3',
+      placeholder: cfg.reasonHint,
+    });
+    if (cfg.reasonDefault) reasonIn.value = cfg.reasonDefault;
+    const errBox = h('div', { class: 'dlv-err' });
+
+    const body = h('div', {}, [
+      errBox,
+      h('dl', { class: 'dlvl-kv' }, cfg.kv),
+      h('div', { class: 'field' }, [
+        h('label', { class: 'field__label' }, '件数 *'),
+        qtyIn,
+      ]),
+      h('div', { class: 'field' }, [
+        h('label', { class: 'field__label' }, '原因 *'),
+        reasonIn,
+        h('div', { class: 'small muted', style: { marginTop: '4px' } }, cfg.reasonNote),
+      ]),
+    ]);
+
+    const okBtn = h('button', { class: 'btn btn--primary' }, cfg.okText);
+    function showError(msg) {
+      errBox.innerHTML = msg;
+      errBox.classList.add('on');
+    }
+    async function submit() {
+      const reason = reasonIn.value.trim();
+      const qv = qtyIn.value.trim();
+      if (!qv || Number(qv) < 1) {
+        showError(`请填写件数（1 ~ ${qty(cfg.maxQty)} 件）。`);
+        return;
+      }
+      if (Number(qv) > Number(cfg.maxQty)) {
+        showError(`件数不能超过未核销数量 ${qty(cfg.maxQty)} 件。`);
+        return;
+      }
+      if (reason.length < 2) {
+        showError('原因必填（至少 2 个字）。');
+        return;
+      }
+      okBtn.disabled = true;
+      okBtn.textContent = '提交中…';
+      try {
+        await api(cfg.url, { method: 'POST', body: { ...cfg.payload, qty: Number(qv), reason } });
+        toast(cfg.doneMsg(qv), 'success');
+        m.close();
+        if (cfg.after) cfg.after();
+      } catch (e) {
+        showError(cfg.failPrefix + escapeHtml(apiErr(e)));
+        okBtn.disabled = false;
+        okBtn.textContent = cfg.okText;
+      }
+    }
+    okBtn.addEventListener('click', submit);
+    const m = openModal({
+      title: cfg.title, body,
+      footer: [h('button', { class: 'btn', onclick: () => m.close() }, '取消'), okBtn],
+    });
+  }
+
+  /* 手动核销关联：把一行返件关联到当前维度 */
+  function openLinkDialog(d, x, after) {
+    const maxQty = Number(x.unlink_qty || x.qty || 0);
+    actionDialog({
+      title: '手动核销关联',
+      url: '/delivery/ledger/link',
+      payload: { return_id: x.id },
+      maxQty,
+      okText: '确认关联',
+      doneMsg: n => `已关联核销 ${n} 件`,
+      failPrefix: '关联失败：',
+      reasonDefault: '手动核销关联',
+      reasonHint: '例如：这批返件就是该发货单退回来的 —— 必填，至少 2 个字',
+      reasonNote: '手动核销关联把这一行返件计入「已核销」，'
+        + '计入后它就从「已返回但未核销关联」里消失。记录会连同操作人与时间留痕。',
+      kv: [
+        h('dt', {}, '整机厂家'), h('dd', {}, d.turbine_vendor || '—'),
+        h('dt', {}, '项目风场'), h('dd', {}, d.project_site || '（风场为空）'),
+        h('dt', {}, '退回单号'), h('dd', { class: 'mono' }, x.return_no || '—'),
+        h('dt', {}, '返件料号'), h('dd', { class: 'mono' }, x.material_no || '—'),
+        h('dt', {}, '返件数量'), h('dd', {}, `${qty(x.qty)} 件`
+          + `（已核销 ${qty(x.clr_qty)} / 未核销 ${qty(x.unlink_qty)}）`),
+      ],
+      after,
+    });
+  }
+
+  /* 手工清账：不关联具体发货单，直接把差额抹掉 */
+  function openClearDialog(d, x, after) {
+    actionDialog({
+      title: '手工清账',
+      url: '/delivery/ledger/clear',
+      payload: { return_id: x.id },
+      maxQty: Number(x.unlink_qty || x.qty || 0),
+      okText: '确认清账',
+      doneMsg: n => `已清账 ${n} 件`,
+      failPrefix: '清账失败：',
+      reasonHint: '例如：换件不返还 / 现场留用 / 物流遗失 —— 必填，至少 2 个字',
+      reasonNote: '手工清账是把差额抹掉（换件不返还 / 现场留用 / 遗失等），'
+        + '所以必须写清理由 —— 否则将来没人说得清这批货去哪了。',
+      kv: [
+        h('dt', {}, '整机厂家'), h('dd', {}, d.turbine_vendor || '—'),
+        h('dt', {}, '项目风场'), h('dd', {}, d.project_site || '（风场为空）'),
+        h('dt', {}, '退回单号'), h('dd', { class: 'mono' }, x.return_no || '—'),
+        h('dt', {}, '返件数量'), h('dd', {}, `${qty(x.qty)} 件`
+          + `（已核销 ${qty(x.clr_qty)} / 未核销 ${qty(x.unlink_qty)}）`),
+      ],
+      after,
+    });
+  }
+
+  /* 发货侧清账（2026-09-23 用户口径）：① 发货单核销 每张单 ② 发货行明细 每一行 */
+  function openShipClearDialog(d, x, scope) {
+    const isDoc = scope === 'shipdoc';
+    const maxQty = isDoc ? Number(x.pend || 0) : Number(x.ship_remain || 0);
+    if (maxQty <= 0) {
+      toast(isDoc ? '这张单的待核销已经是 0 了' : '这一行的待核销已经是 0 了', 'warn');
+      return;
+    }
+    const payload = {
+      scope,
+      turbine_vendor: d.turbine_vendor,
+      project_site: d.project_site,
+      doc_no: x.doc_no,
+    };
+    if (!isDoc) {
+      payload.material_no = x.material_no || '';
+      if (x.split) payload.serial_no = x.serial_no || '';
+    }
+    actionDialog({
+      title: isDoc ? '发货单清账' : '发货行清账',
+      url: '/delivery/ledger/ship-clear',
+      payload,
+      maxQty,
+      okText: '确认清账',
+      doneMsg: n => `已清账 ${n} 件`,
+      failPrefix: '清账失败：',
+      reasonHint: '例如：客户确认不再返回 / 已现场处置 —— 必填，至少 2 个字',
+      reasonNote: isDoc
+        ? '发货单清账按整张单扣减「待核销」；它不动「已返回但未核销关联」。'
+        : '发货行清账按这一行扣减「待核销」；带序列号的行只清这一个序列号那一件。',
+      kv: [
+        h('dt', {}, '整机厂家'), h('dd', {}, d.turbine_vendor || '—'),
+        h('dt', {}, '项目风场'), h('dd', {}, d.project_site || '（风场为空）'),
+        h('dt', {}, '发货单号'), h('dd', { class: 'mono' }, x.doc_no || '—'),
+        h('dt', {}, isDoc ? '发货 / 已核销 / 待核销' : '料号 / 型号'),
+        h('dd', {}, isDoc
+          ? `${qty(x.qty)} / ${qty(x.clr)} / ${qty(x.pend)} 件`
+          : `${x.material_no || '—'}${x.product_model ? ' · ' + x.product_model : ''}`),
+        ...(isDoc ? [] : [
+          h('dt', {}, '序列号'), h('dd', { class: 'mono' }, x.serial_no || '—'),
+          h('dt', {}, '这一行'), h('dd', {}, `${qty(x.qty)} 件`
+            + `（已清账 ${qty(x.clr_qty)} / 待核销 ${qty(x.ship_remain)}）`),
+        ]),
+      ],
+      after,
+    });
+  }
+
+  /* 按型号自动核销：先试算（dry-run）给人看，确认后才真写 kind='auto' 记录 */
+  async function openAutoDialog(d, after) {
+    const scope = d
+      ? { turbine_vendor: d.turbine_vendor, project_site: d.project_site }
+      : { all: 1 };
+    let plan;
+    try {
+      plan = await api('/delivery/ledger/auto', {
+        method: 'POST', body: { need_mode: fNeed, dry_run: 1, ...scope },
+      });
+    } catch (e) {
+      toast('试算失败：' + apiErr(e), 'error');
+      return;
+    }
+    const rows = plan.rows || [];
+    const sk = plan.skipped_rows || [];
+    const whyCount = {};
+    sk.forEach(x => {
+      const w = x.why || '其他';
+      whyCount[w] = (whyCount[w] || 0) + 1;
+    });
+    const whyText = Object.keys(whyCount).map(w => `${w} ${whyCount[w]} 行`).join(' · ');
+    let m = null;
+    const okBtn = h('button', { class: 'btn btn--primary' }, '确认自动核销');
+    okBtn.disabled = !rows.length;
+    okBtn.addEventListener('click', async () => {
+      okBtn.disabled = true;
+      okBtn.textContent = '写入中…';
+      try {
+        const r = await api('/delivery/ledger/auto', {
+          method: 'POST', body: { need_mode: fNeed, ...scope },
+        });
+        toast(`已自动核销 ${r.written} 条 / ${qty(r.qty)} 件`, 'success');
+        m.close();
+        if (after) await after();
+      } catch (e) {
+        toast('自动核销失败：' + apiErr(e), 'error');
+        okBtn.disabled = false;
+        okBtn.textContent = '确认自动核销';
+      }
+    });
+    const body = h('div', { class: 'dlvl-detail' }, [
+      h('div', { class: 'small muted', style: { marginBottom: '10px' } },
+        `共 ${plan.dims || 0} 个维度：型号对得上的返件 `
+        + `${plan.planned || 0} 条 / ${qty(plan.qty)} 件；跳过（对不上发货侧型号）`
+        + `${plan.skipped || 0} 条，留给手动关联。`
+        + '这一步只是试算，点「确认自动核销」才会真写记录（写完能在「核销明细」里撤销）。'),
+      h('div', { class: 'dlvl-sec__title' },
+        `计划自动核销 ${rows.length} 条（最多列 200 条）`),
+      miniTable(['整机厂家', '项目风场', '退回单号', '返件型号', '发货侧型号',
+                 '发货单号', { label: '件数', num: true }],
+        rows, x => [
+          h('td', {}, x.turbine_vendor || '—'),
+          h('td', {}, x.project_site || '（风场为空）'),
+          h('td', { class: 'mono' }, x.return_no || '—'),
+          h('td', {}, x.product_model || '—'),
+          h('td', {}, x.ship_model || '—'),
+          h('td', { class: 'mono' }, x.doc_no || '—'),
+          h('td', { class: 'num' }, qty(x.qty)),
+        ], '没有可以按型号自动核销的返件。'),
+      h('div', { class: 'dlvl-sec__title' },
+        `对不上、留给手动关联 ${sk.length} 条` + (whyText ? `（${whyText}）` : '')),
+      miniTable(['整机厂家', '项目风场', '退回单号', '返件型号',
+                 { label: '件数', num: true }, '对不上的原因'],
+        sk, x => [
+          h('td', {}, x.turbine_vendor || '—'),
+          h('td', {}, x.project_site || '（风场为空）'),
+          h('td', { class: 'mono' }, x.return_no || '—'),
+          h('td', {}, x.product_model || '（没填型号）'),
+          h('td', { class: 'num' }, qty(x.qty)),
+          h('td', {}, x.why || '—'),
+        ], '所有返件都能按型号对上。'),
+    ]);
+    m = openModal({
+      title: '按型号自动核销 · 试算' + (d ? ' · ' + (d.turbine_vendor || '') : ' · 全台账'),
+      wide: true, body,
+      footer: [h('button', { class: 'btn', onclick: () => m.close() }, '取消'), okBtn],
+    });
+  }
+
+  async function removeClear(x, after) {
+    const kind = x.kind === 'link' ? '手动关联' : '手工清账';
+    const yes = await confirmDialog(
+      `确定撤销这条${kind}吗？<br>${qty(x.qty)} 件 · ${escapeHtml(x.reason || '')}<br>`
+      + '撤销后这些件数会重新回到「未核销」。',
+      { title: '撤销核销', danger: true });
+    if (!yes) return;
+    try {
+      await api('/delivery/ledger/clears/' + x.id, { method: 'DELETE' });
+      toast('已撤销该条核销记录', 'success');
+      if (after) after(); else loadList();
+    } catch (e) {
+      toast('撤销失败：' + apiErr(e), 'error');
+    }
+  }
+
+  /* ================= 未归属返件 + 别名表 ================= */
+  function openUnmatched() {
+    const m = meta || {};
+    const un = m.unmatched || [];
+    const amb = m.ambiguous || [];
+    const cmap = x => (x.candidates || []).map(c =>
+      `${c.vendor} / ${c.site || '（风场为空）'}`).join('　|　');
+
+    // 未归属的返件也能手工清账（2026-09-23 用户口径）：这批返件归位不到任何
+    // 维度，所以不存在「关联到哪张发货单」，能做的就是清账（换件不返还 /
+    // 现场留用 / 遗失等）—— 清完它就从这张清单上消失，页头计数里记一笔。
+    let mm = null;
+    const clearBtn = x => h('button', {
+      class: 'btn btn--sm',
+      onclick: () => openClearDialog(
+        { turbine_vendor: x.turbine_vendor, project_site: x.project_site },
+        { id: x.return_id, return_no: x.return_no, qty: x.qty,
+          clr_qty: x.clr_qty, unlink_qty: x.unlink_qty },
+        async () => {
+          mm.close();
+          await loadOptions();
+          await loadList();
+          openUnmatched();
+        }),
+    }, '手动清账');
+
+    const body = h('div', { class: 'dlvl-detail' }, [
+      h('div', { class: 'small muted', style: { marginBottom: '10px' } },
+        `返件共 ${m.ret_lines || 0} 行：已归位 ${m.ret_matched_lines || 0} 行 · `
+        + `歧义 ${m.ret_ambiguous_lines || 0} 行 · 未匹配 ${m.ret_unmatched_lines || 0} 行`
+        + ` · 已人工清账 / 关联 ${m.unattr_cleared_lines || 0} 行。`
+        + `销售端返件已按口径剔除 ${m.ret_sales_lines || 0} 行，不在这张清单里。`
+        + '下面每张表最多列 200 行；名字不一致的，用「厂家 / 风场别名」校准一次即可长期生效；'
+        + '确实永远归位不上的（不该算进任何风场），用行尾的「手动清账」抹掉。'),
+      h('div', { class: 'dlvl-sec__title' }, `未匹配（该厂家在发货侧没有对应维度）${un.length} 行`),
+      miniTable(['退回单号', '退回日期', '返件厂家', '返件风场', { label: '数量', num: true },
+                 { label: '未核销', num: true }, '操作'],
+        un, x => [
+          h('td', { class: 'mono' }, x.return_no || '—'),
+          h('td', {}, x.return_date || '—'),
+          h('td', {}, x.turbine_vendor || '—'),
+          h('td', {}, x.project_site || '—'),
+          h('td', { class: 'num' }, qty(x.qty)),
+          h('td', { class: 'num' }, qty(x.unlink_qty)),
+          h('td', {}, clearBtn(x)),
+        ], '没有未匹配的返件'),
+      h('div', { class: 'dlvl-sec__title' }, `歧义（同分候选，没敢硬塞）${amb.length} 行`),
+      miniTable(['退回单号', '返件厂家', '返件风场', { label: '数量', num: true },
+                 { label: '未核销', num: true }, '候选维度', '操作'],
+        amb, x => [
+          h('td', { class: 'mono' }, x.return_no || '—'),
+          h('td', {}, x.turbine_vendor || '—'),
+          h('td', {}, x.project_site || '（风场为空）'),
+          h('td', { class: 'num' }, qty(x.qty)),
+          h('td', { class: 'num' }, qty(x.unlink_qty)),
+          h('td', { class: 'small' }, cmap(x) || '—'),
+          h('td', {}, clearBtn(x)),
+        ], '没有歧义的返件'),
+    ]);
+    mm = openModal({
+      title: '未归属返件', wide: true, body,
+      footer: [h('button', { class: 'btn', onclick: () => mm.close() }, '关闭')],
+    });
+  }
+
+  async function openAlias() {
+    let a;
+    try {
+      a = await api('/delivery/ledger/alias');
+    } catch (e) {
+      toast('读取别名表失败：' + apiErr(e), 'error');
+      return;
+    }
+    // 自定义别名按「原写法 = 目标写法」一行一条回填；内置默认不写进输入框（只展示）
+    const fmt = custom => Object.entries(custom || {})
+      .map(([k, v]) => `${k} = ${v}`).join('\n');
+    const vIn = h('textarea', { class: 'textarea', rows: '7',
+      placeholder: '一行一条：原写法 = 目标写法\n例如：明阳风电 = 明阳智能' });
+    vIn.value = fmt(a.custom && a.custom.vendors);
+    const sIn = h('textarea', { class: 'textarea', rows: '7',
+      placeholder: '一行一条：原写法 = 目标写法\n例如：盐城大丰三峡 = 大丰三峡' });
+    sIn.value = fmt(a.custom && a.custom.sites);
+
+    /* --- 明细页签（2026-09-23 用户口径：别名表要能查询明细）---
+       懒加载：点开页签才去问后端，免得每次开别名表都白算一遍。 */
+    let dData = null;
+    const dInfo = h('div', { class: 'small muted', style: { marginBottom: '8px' } },
+      '点「明细」页签后读取每条别名的命中情况…');
+    const dSearch = h('input', { class: 'input',
+      placeholder: '筛选：原写法 / 目标写法',
+      style: { maxWidth: '260px', marginBottom: '10px' } });
+    const dBody = h('div', {});
+    dSearch.addEventListener('input', () => renderAliasDetail());
+
+    function detailTable(rows) {
+      const kw = dSearch.value.trim();
+      const list = kw ? rows.filter(x => (x.key + ' ' + x.to).includes(kw)) : rows;
+      return miniTable(
+        ['原写法', '目标写法', '来源', '发货侧（单/行/件）',
+          { label: '归并维度', num: true }, '返件侧（行/件/单）', '操作'],
+        list, x => [
+          h('td', {}, x.key),
+          h('td', {}, x.to),
+          h('td', { class: 'small muted' }, x.source || '—'),
+          h('td', {}, x.ship.lines
+            ? `${x.ship.docs} / ${x.ship.lines} / ${qty(x.ship.qty)}` : '—'),
+          h('td', { class: 'num' }, x.ship.dims ? String(x.ship.dims) : '—'),
+          h('td', {}, x.ret.lines
+            ? `${x.ret.lines} / ${qty(x.ret.qty)} / ${x.ret.docs}` : '—'),
+          h('td', {}, [
+            x.used
+              ? h('button', { class: 'btn btn--sm',
+                  onclick: () => showAliasRows(x.field, x.key, x.to) }, '详情')
+              : h('span', { class: 'small muted' }, '未命中'),
+          ]),
+        ], kw ? '没有匹配的别名' : '（还没有别名）');
+    }
+
+    function renderAliasDetail() {
+      if (!dData) return;
+      dBody.replaceChildren(
+        h('div', { class: 'dlvl-sec__title' },
+          `整机厂家别名 ${(dData.vendors || []).length} 条`),
+        detailTable(dData.vendors || []),
+        h('div', { class: 'dlvl-sec__title', style: { marginTop: '16px' } },
+          `项目风场别名 ${(dData.sites || []).length} 条`),
+        detailTable(dData.sites || []));
+    }
+
+    async function loadAliasDetail() {
+      if (dData) return;
+      dInfo.textContent = '读取中…';
+      try {
+        const m = await api('/delivery/ledger/alias/detail?need_mode='
+          + encodeURIComponent(fNeed));
+        (m.vendors || []).forEach(x => { x.field = 'vendor'; });
+        (m.sites || []).forEach(x => { x.field = 'site'; });
+        dData = m;
+        const ms = m.meta || {};
+        dInfo.textContent = `口径与台账一致：发货侧 ${ms.ship_lines || 0} 行`
+          + `（售后发货单·已核准 + 需返回口径），返件侧 ${ms.ret_lines || 0} 行`
+          + `（已剔销售端）。共 ${ms.pairs || 0} 条别名，`
+          + `${ms.unused || 0} 条没有命中任何数据；「发货侧 / 返件侧」列是`
+          + `单数 / 行数 / 件数，点「详情」看具体单号。`;
+        renderAliasDetail();
+      } catch (e) {
+        dInfo.textContent = '';
+        dBody.replaceChildren(h('div', { class: 'empty' }, '读取失败：' + apiErr(e)));
+      }
+    }
+
+    async function showAliasRows(side, key, to) {
+      let d;
+      try {
+        d = await api('/delivery/ledger/alias/rows?'
+          + buildQuery({ side: side, key: key, to: to, need_mode: fNeed }));
+      } catch (e) {
+        toast('读取明细失败：' + apiErr(e), 'error');
+        return;
+      }
+      const sh = d.ship || {};
+      const rt = d.ret || {};
+      const body = h('div', { class: 'dlvl-detail' }, [
+        h('div', { class: 'small muted', style: { marginBottom: '10px' } },
+          `别名「${d.key} = ${d.to}」命中的原始写法：${(d.names || []).join(' / ')}；`
+          + `发货侧 ${sh.total || 0} 行、返件侧 ${rt.total || 0} 行`
+          + `（每侧最多显示 ${d.limit || 500} 行）。`),
+        h('div', { class: 'dlvl-sec__title' },
+          `发货侧明细（售后发货单·已核准）${sh.total || 0} 行`),
+        miniTable(['发货单号', '发货日期', '客户（ERP 原文）', '拆出的厂家', '拆出的风场',
+                   '物料编码', '型号', { label: '数量', num: true }],
+          sh.rows || [], x => [
+            h('td', { class: 'mono' }, x.doc_no || '—'),
+            h('td', {}, x.doc_date || '—'),
+            h('td', {}, x.customer || '—'),
+            h('td', {}, x.vendor || '—'),
+            h('td', {}, x.site || '（风场为空）'),
+            h('td', { class: 'mono' }, x.material_no || '—'),
+            h('td', {}, x.product_model || '—'),
+            h('td', { class: 'num' }, qty(x.qty)),
+          ], '该写法在发货侧没有行'),
+        h('div', { class: 'dlvl-sec__title', style: { marginTop: '16px' } },
+          `返件侧明细（已剔销售端）${rt.total || 0} 行`),
+        miniTable(['退回单号', '退回日期', '整机厂家', '项目风场', '型号',
+                   '物料编码', { label: '数量', num: true }],
+          rt.rows || [], x => [
+            h('td', { class: 'mono' }, x.return_no || '—'),
+            h('td', {}, x.return_date || '—'),
+            h('td', {}, x.turbine_vendor || '—'),
+            h('td', {}, x.project_site || '（风场为空）'),
+            h('td', {}, x.product_model || '—'),
+            h('td', { class: 'mono' }, x.material_no || '—'),
+            h('td', { class: 'num' }, qty(x.qty)),
+          ], '该写法在返件侧没有行'),
+      ]);
+      const m2 = openModal({
+        title: '别名明细 · ' + (d.key || ''),
+        wide: true, body: body,
+        footer: [h('button', { class: 'btn', onclick: () => m2.close() }, '关闭')],
+      });
+    }
+
+    const editPane = h('div', {}, [
+      h('div', { class: 'small muted', style: { marginBottom: '10px' } },
+        '别名只影响台账里的归位与汇总，不会改动退回登记或发货明细的原始数据。'
+        + '内置的几条默认别名（明阳风电→明阳智能 等）不受这里影响，'
+        + '这里写的是你自己补充的。两个方向都认：写「A = B」或「B = A」都能对上。'),
+      h('div', { class: 'dlvl-sec__title' }, `整机厂家别名（内置 ${Object.keys(a.defaults && a.defaults.vendors || {}).length} 条）`),
+      h('div', { class: 'small muted', style: { marginBottom: '6px' } },
+        Object.entries(a.defaults && a.defaults.vendors || {})
+          .map(([k, v]) => `${k} = ${v}`).join('；') || '（无）'),
+      vIn,
+      h('div', { class: 'dlvl-sec__title' }, `项目风场别名（内置 ${Object.keys(a.defaults && a.defaults.sites || {}).length} 条）`),
+      sIn,
+    ]);
+
+    const parse = text => {
+      const out = {};
+      String(text || '').split('\n').forEach(line => {
+        const t = line.trim();
+        if (!t) return;
+        const i = t.indexOf('=');
+        if (i <= 0) return;
+        const k = t.slice(0, i).trim();
+        const v = t.slice(i + 1).trim();
+        if (k && v && k !== v) out[k] = v;
+      });
+      return out;
+    };
+    const okBtn = h('button', { class: 'btn btn--primary' }, '保存');
+    okBtn.addEventListener('click', async () => {
+      okBtn.disabled = true;
+      okBtn.textContent = '保存中…';
+      try {
+        await api('/delivery/ledger/alias', { method: 'PUT',
+          body: { vendors: parse(vIn.value), sites: parse(sIn.value) } });
+        toast('别名表已保存', 'success');
+        mm.close();
+        await loadOptions();
+        loadList();
+      } catch (e) {
+        toast('保存失败：' + apiErr(e), 'error');
+        okBtn.disabled = false;
+        okBtn.textContent = '保存';
+      }
+    });
+    /* 两个页签：编辑（原来的文本框）/ 明细（每条别名的命中 + 下钻到单号） */
+    const panes = [editPane, h('div', {}, [dInfo, dSearch, dBody])];
+    const titles = ['编辑', '明细'];
+    const paneBox = h('div', {});
+    const tabBtns = titles.map((t, i) => h('button', {
+      class: 'dlvl-tab' + (i === 0 ? ' on' : ''),
+      onclick: () => pickTab(i),
+    }, t));
+    function pickTab(i) {
+      tabBtns.forEach((b, k) => b.classList.toggle('on', k === i));
+      paneBox.replaceChildren(panes[i]);
+      if (i === 1) loadAliasDetail();
+    }
+    paneBox.replaceChildren(panes[0]);
+
+    const wrap = h('div', { class: 'dlvl-detail' }, [
+      h('div', { class: 'dlvl-tabs' }, tabBtns),
+      paneBox,
+    ]);
+    const mm = openModal({
+      title: '厂家 / 风场别名（台账自动校准）', wide: true, body: wrap,
+      footer: [h('button', { class: 'btn', onclick: () => mm.close() }, '取消'), okBtn],
+    });
+  }
+
+  /* ================= 导出当前视图（客户端生成 CSV）================= */
+  // 导出的是「按当前筛选的全部行」，不是屏幕上这一页：后端每页上限 500，往回捞。
+  async function exportCsv() {
+    const all = [];
+    let tot = 0;
+    try {
+      for (let p = 1; p <= 20; p += 1) {
+        const res = await api('/delivery/ledger?'
+          + buildQuery(listParams({ page: p, page_size: 500 })));
+        const rows = res.rows || [];
+        tot = Number(res.total || rows.length);
+        all.push(...rows);
+        if (!rows.length || all.length >= tot) break;
+      }
+    } catch (e) {
+      toast('导出失败：' + apiErr(e), 'error');
+      return;
+    }
+    if (!all.length) { toast('当前没有可导出的数据', 'info'); return; }
+    const cols = ['整机厂家', '项目风场', '发货单数', '发货件数', '已返回',
+      '已核销-手动关联', '已核销-手工清账', '已核销合计', '待核销',
+      '返件未核销', '状态', '最近发货'];
+    const esc = v => {
+      const t = String(v === null || v === undefined ? '' : v);
+      return /[",\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+    };
+    const lines = [cols.join(',')];
+    all.forEach(r => lines.push([
+      r.turbine_vendor, r.project_site, r.docs_n, r.ship_qty, r.ret_qty,
+      r.clr_link, r.clr_clear, r.clr_qty, r.pend_qty, r.unlink_qty,
+      r.status, r.last_ship,
+    ].map(esc).join(',')));
+    // BOM 开头，Excel 打开中文不乱码
+    const blob = new Blob(['\ufeff' + lines.join('\r\n')],
+      { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = h('a', { href: url, download: `核销台账_${todayStr()}.csv` });
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 3000);
+    toast(all.length < tot
+      ? `已导出 ${all.length} 行（当前筛选共 ${tot} 行，导出上限 10000 行）`
+      : `已导出 ${all.length} 行（按当前筛选）`, 'success');
+  }
+
+  function todayStr() {
+    const d = new Date();
+    const p2 = x => String(x).padStart(2, '0');
+    return `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}`;
+  }
+
+  /* ================= 启动 ================= */
+  // 首屏渲染放在最后：上面的函数依赖本文件中后置声明的 let/const，
+  // 提前调用会触发 TDZ 错误并中断整个 IIFE（本项目记录过的坑）。
+  await loadOptions();
+  await loadList();
+  kwInput.focus();
+})();
+</script>
+</body>
+</html>
